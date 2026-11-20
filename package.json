@@ -8,7 +8,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test \"test/*.test.js\"",
+    "test:db": "node --env-file-if-exists=.env --test --test-concurrency=1 \"test/db/*.test.js\"",
     "fetch:sample": "node --env-file-if-exists=.env scripts/fetch-sample.js"
   },
   "license": "MIT",
