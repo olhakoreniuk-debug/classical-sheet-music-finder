@@ -2,86 +2,40 @@
 //
 // Run with: mise exec -- npm run test:db   (requires `docker compose up -d`)
 //
-// Isolation: every run creates its own schema test_<16 hex chars>, loads
-// db/schema.sql into it and drops it at the end. All test connections use
-// search_path = that schema only, so unqualified table names can never reach
-// the application's real tables in "public". The row counts of the real
-// tables are compared before and after as an extra safety check.
+// Isolation: see test/db/testSchema.js. Every run uses its own temporary
+// schema; the application's real tables are never touched, and their row
+// counts are compared before and after.
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import pg from 'pg';
-import { createPool, readDbConfig } from '../../src/db.js';
+import { createTestSchema } from './testSchema.js';
 import {
   savePage,
   startImportRun,
   resumeImportRun,
   finishImportRun,
   findResumableRun,
+  acquireImporterLock,
   ImportRunStateError,
+  OffsetMismatchError,
 } from '../../src/repository.js';
 
-const SCHEMA_PATTERN = /^test_[0-9a-f]{16}$/;
-const schema = `test_${randomBytes(8).toString('hex')}`;
-const quotedSchema = pg.escapeIdentifier(schema);
-const REAL_TABLES = ['works', 'composers', 'import_runs'];
-
-let adminPool; // default search_path; only creates/drops the test schema and reads public counts
-let pool; // all repository calls; search_path = test schema only
-let realCountsBefore;
-
-function assertTestSchemaName(name) {
-  assert.match(name, SCHEMA_PATTERN, 'refusing to use a schema that is not a generated test schema');
-}
-
-function testPool(options = {}) {
-  assertTestSchemaName(schema);
-  return createPool(readDbConfig(), { options: `-c search_path=${quotedSchema}`, ...options });
-}
-
-async function countRealTables() {
-  const counts = {};
-  for (const table of REAL_TABLES) {
-    const qualified = `public.${pg.escapeIdentifier(table)}`;
-    const { rows } = await adminPool.query('SELECT to_regclass($1) AS oid', [qualified]);
-    if (rows[0].oid === null) {
-      counts[table] = null; // table does not exist in public
-    } else {
-      const result = await adminPool.query(`SELECT count(*)::int AS n FROM ${qualified}`);
-      counts[table] = result.rows[0].n;
-    }
-  }
-  return counts;
-}
+let db; // test schema handle
+let pool;
 
 before(async () => {
-  assertTestSchemaName(schema);
-  adminPool = createPool(readDbConfig(), { max: 1 });
-  realCountsBefore = await countRealTables();
-  await adminPool.query(`CREATE SCHEMA ${quotedSchema}`);
-  pool = testPool();
-  const schemaSql = await readFile(new URL('../../db/schema.sql', import.meta.url), 'utf8');
-  await pool.query(schemaSql);
+  db = await createTestSchema();
+  pool = db.pool;
 });
 
 after(async () => {
-  await pool?.end();
-  if (adminPool) {
-    assertTestSchemaName(schema);
-    await adminPool.query(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE`);
-    const realCountsAfter = await countRealTables();
-    await adminPool.end();
-    assert.deepEqual(realCountsAfter, realCountsBefore, 'real tables in public must not change');
-  }
+  await db?.drop();
 });
 
 beforeEach(async () => {
-  await pool.query(
-    `TRUNCATE ${quotedSchema}.works, ${quotedSchema}.composers, ${quotedSchema}.import_runs
-     RESTART IDENTITY CASCADE`,
-  );
+  await db.truncateAll();
 });
 
 // ---------- helpers ----------
@@ -130,7 +84,7 @@ test('every pooled connection uses only the test schema', async () => {
                 (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.oid = 'works'::regclass) AS works_schema`,
       );
-      assert.deepEqual(rows[0], { current: schema, path: schema, works_schema: schema });
+      assert.deepEqual(rows[0], { current: db.schema, path: db.schema, works_schema: db.schema });
     }
   } finally {
     clients.forEach((client) => client.release());
@@ -143,11 +97,13 @@ test('inserts new works and composers with every column', async () => {
   const run = await startImportRun(pool);
   const result = await savePage(pool, {
     runId: run.id,
+    pageStart: 0,
     works: [work(1), work(2, { catalogueNumber: null, imslpPageId: null, parent: null })],
     fetchedCount: 2,
-    nextOffset: 2,
   });
-  assert.deepEqual(result, { inserted: 2, updated: 0, unchanged: 0, composersInserted: 1 });
+  assert.deepEqual(result, {
+    inserted: 2, updated: 0, unchanged: 0, composersInserted: 1, nextOffset: 2, finished: false,
+  });
 
   const rows = await worksByPermlink();
   const first = rows.get(work(1).permlink);
@@ -169,9 +125,10 @@ test('inserts new works and composers with every column', async () => {
 test('a work without composer gets composer_id NULL and creates no composer', async () => {
   const run = await startImportRun(pool);
   const result = await savePage(pool, {
-    runId: run.id, works: [work(1, { composerName: null })], fetchedCount: 1, nextOffset: 1,
+    runId: run.id, pageStart: 0, works: [work(1, { composerName: null })], fetchedCount: 1,
   });
-  assert.deepEqual(result, { inserted: 1, updated: 0, unchanged: 0, composersInserted: 0 });
+  assert.equal(result.inserted, 1);
+  assert.equal(result.composersInserted, 0);
   const row = (await worksByPermlink()).get(work(1).permlink);
   assert.equal(row.composer_id, null);
   assert.equal(await count('composers'), 0);
@@ -182,9 +139,9 @@ test('stores Unicode composer names and titles unchanged', async () => {
   const run = await startImportRun(pool);
   await savePage(pool, {
     runId: run.id,
+    pageStart: 0,
     works: names.map((name, i) => work(i, { composerName: name, title: `Œuvre ${name}` })),
     fetchedCount: names.length,
-    nextOffset: names.length,
   });
   const { rows } = await pool.query('SELECT name FROM composers ORDER BY id');
   assert.deepEqual(rows.map((row) => row.name), names);
@@ -194,30 +151,30 @@ test('stores Unicode composer names and titles unchanged', async () => {
 
 // ---------- upsert counters (real PostgreSQL 17 RETURNING behaviour) ----------
 
-test('UPSERT counters: new, same page again, then partly changed page', async () => {
+test('UPSERT counters: new, same works again, then partly changed works', async () => {
   const run = await startImportRun(pool);
   const page = [work(1), work(2), work(3)];
 
-  const first = await savePage(pool, { runId: run.id, works: page, fetchedCount: 3, nextOffset: 3 });
-  assert.deepEqual(first, { inserted: 3, updated: 0, unchanged: 0, composersInserted: 1 });
+  const first = await savePage(pool, { runId: run.id, pageStart: 0, works: page, fetchedCount: 3 });
+  assert.deepEqual([first.inserted, first.updated, first.unchanged, first.composersInserted], [3, 0, 0, 1]);
 
-  const again = await savePage(pool, { runId: run.id, works: page, fetchedCount: 3, nextOffset: 3 });
-  assert.deepEqual(again, { inserted: 0, updated: 0, unchanged: 3, composersInserted: 0 });
+  const again = await savePage(pool, { runId: run.id, pageStart: 3, works: page, fetchedCount: 3 });
+  assert.deepEqual([again.inserted, again.updated, again.unchanged, again.composersInserted], [0, 0, 3, 0]);
 
   const changed = [work(1), work(2, { title: 'Renamed' }), work(3), work(4)];
-  const third = await savePage(pool, { runId: run.id, works: changed, fetchedCount: 4, nextOffset: 7 });
-  assert.deepEqual(third, { inserted: 1, updated: 1, unchanged: 2, composersInserted: 0 });
+  const third = await savePage(pool, { runId: run.id, pageStart: 6, works: changed, fetchedCount: 4 });
+  assert.deepEqual([third.inserted, third.updated, third.unchanged, third.composersInserted], [1, 1, 2, 0]);
 
   assert.equal(await count('works'), 4);
   const runRow = await getRun(run.id);
   assert.equal(runRow.works_fetched, 3 + 3 + 4);
   assert.equal(runRow.works_upserted, 3 + 0 + 2);
-  assert.equal(runRow.next_offset, 7);
+  assert.equal(runRow.next_offset, 10);
 });
 
 test('each data column change counts as an update, including setting a value to NULL', async () => {
   const run = await startImportRun(pool);
-  await savePage(pool, { runId: run.id, works: [work(1)], fetchedCount: 1, nextOffset: 1 });
+  await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 1 });
   const changes = [
     { imslpId: 'changed id' },
     { title: 'changed title' },
@@ -228,10 +185,12 @@ test('each data column change counts as an update, including setting a value to 
     { parent: 'Category:Other' },
   ];
   let current = work(1);
+  let offset = 1;
   for (const change of changes) {
     current = { ...current, ...change };
-    const result = await savePage(pool, { runId: run.id, works: [current], fetchedCount: 1, nextOffset: 1 });
-    assert.deepEqual(result.updated, 1, `expected an update for ${JSON.stringify(change)}`);
+    const result = await savePage(pool, { runId: run.id, pageStart: offset, works: [current], fetchedCount: 1 });
+    offset += 1;
+    assert.equal(result.updated, 1, `expected an update for ${JSON.stringify(change)}`);
   }
   const row = (await worksByPermlink()).get(work(1).permlink);
   assert.equal(row.composer_id, null);
@@ -240,15 +199,14 @@ test('each data column change counts as an update, including setting a value to 
 
 test('an update changes updated_at and last_import_run_id but not created_at; unchanged rows are not touched', async () => {
   const run1 = await startImportRun(pool);
-  await savePage(pool, { runId: run1.id, works: [work(1), work(2)], fetchedCount: 2, nextOffset: 2 });
-  await finishImportRun(pool, run1.id, { status: 'succeeded' });
+  await savePage(pool, { runId: run1.id, pageStart: 0, works: [work(1), work(2)], fetchedCount: 2, finish: true });
   const before = await worksByPermlink();
 
   const run2 = await startImportRun(pool);
   const result = await savePage(pool, {
-    runId: run2.id, works: [work(1, { title: 'New title' }), work(2)], fetchedCount: 2, nextOffset: 2,
+    runId: run2.id, pageStart: 0, works: [work(1, { title: 'New title' }), work(2)], fetchedCount: 2,
   });
-  assert.deepEqual(result, { inserted: 0, updated: 1, unchanged: 1, composersInserted: 0 });
+  assert.deepEqual([result.inserted, result.updated, result.unchanged], [0, 1, 1]);
 
   const after = await worksByPermlink();
   const changed = after.get(work(1).permlink);
@@ -269,22 +227,81 @@ test('an update changes updated_at and last_import_run_id but not created_at; un
 
 test('duplicates across pages produce one work and one composer row', async () => {
   const run = await startImportRun(pool);
-  await savePage(pool, { runId: run.id, works: [work(1), work(2)], fetchedCount: 2, nextOffset: 2 });
-  const page2 = await savePage(pool, {
-    runId: run.id, works: [work(2), work(3)], fetchedCount: 2, nextOffset: 4,
-  });
-  assert.deepEqual(page2, { inserted: 1, updated: 0, unchanged: 1, composersInserted: 0 });
+  await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1), work(2)], fetchedCount: 2 });
+  const page2 = await savePage(pool, { runId: run.id, pageStart: 2, works: [work(2), work(3)], fetchedCount: 2 });
+  assert.deepEqual([page2.inserted, page2.updated, page2.unchanged, page2.composersInserted], [1, 0, 1, 0]);
   assert.equal(await count('works'), 3);
   assert.equal(await count('composers'), 1);
 });
 
 test('works in different pages share an existing composer row', async () => {
   const run = await startImportRun(pool);
-  await savePage(pool, { runId: run.id, works: [work(1)], fetchedCount: 1, nextOffset: 1 });
-  await savePage(pool, { runId: run.id, works: [work(2)], fetchedCount: 1, nextOffset: 2 });
+  await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 1 });
+  await savePage(pool, { runId: run.id, pageStart: 1, works: [work(2)], fetchedCount: 1 });
   const { rows } = await pool.query('SELECT DISTINCT composer_id FROM works');
   assert.equal(rows.length, 1);
   assert.notEqual(rows[0].composer_id, null);
+});
+
+// ---------- offset check ----------
+
+test('a page that does not start at the stored next_offset is rejected and writes nothing', async () => {
+  const run = await startImportRun(pool, { startOffset: 100 });
+  await savePage(pool, { runId: run.id, pageStart: 100, works: [work(1)], fetchedCount: 10 });
+
+  for (const stale of [100, 105, 120]) {
+    await assert.rejects(
+      savePage(pool, { runId: run.id, pageStart: stale, works: [work(2)], fetchedCount: 10 }),
+      (error) => error instanceof OffsetMismatchError && error.storedNextOffset === 110,
+    );
+  }
+  assert.equal(await count('works'), 1);
+  const runRow = await getRun(run.id);
+  assert.equal(runRow.next_offset, 110);
+  assert.equal(runRow.works_fetched, 10);
+});
+
+test('two concurrent saves of the same page: exactly one succeeds', async () => {
+  const run = await startImportRun(pool);
+  const attempt = (n) => savePage(pool, { runId: run.id, pageStart: 0, works: [work(n)], fetchedCount: 5 });
+  const results = await Promise.allSettled([attempt(1), attempt(2)]);
+  const fulfilled = results.filter((r) => r.status === 'fulfilled');
+  const rejected = results.filter((r) => r.status === 'rejected');
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.ok(rejected[0].reason instanceof OffsetMismatchError);
+  assert.equal(await count('works'), 1);
+  const runRow = await getRun(run.id);
+  assert.equal(runRow.next_offset, 5);
+  assert.equal(runRow.works_fetched, 5);
+});
+
+// ---------- finish flag ----------
+
+test('finish: true marks the run succeeded in the same transaction as the final page', async () => {
+  const run = await startImportRun(pool);
+  const result = await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 10, finish: true });
+  assert.equal(result.finished, true);
+  const runRow = await getRun(run.id);
+  assert.equal(runRow.status, 'succeeded');
+  assert.ok(runRow.finished_at instanceof Date);
+  assert.equal(runRow.next_offset, 10);
+  assert.equal(await findResumableRun(pool), null);
+  await assert.rejects(
+    savePage(pool, { runId: run.id, pageStart: 10, works: [work(2)], fetchedCount: 1 }),
+    ImportRunStateError,
+  );
+});
+
+test('a failed final page does not mark the run succeeded', async () => {
+  const run = await startImportRun(pool);
+  await assert.rejects(savePage(pool, {
+    runId: run.id, pageStart: 0, works: [work(1, { title: null })], fetchedCount: 1, finish: true,
+  }));
+  const runRow = await getRun(run.id);
+  assert.equal(runRow.status, 'running');
+  assert.equal(runRow.finished_at, null);
+  assert.equal(runRow.next_offset, 0);
 });
 
 // ---------- transactions, rollback and progress ----------
@@ -293,7 +310,7 @@ test('a constraint violation rolls back the whole page and does not advance next
   const run = await startImportRun(pool, { startOffset: 1000 });
   const bad = work(2, { title: null, composerName: 'New Composer' }); // violates works.title NOT NULL
   await assert.rejects(
-    savePage(pool, { runId: run.id, works: [work(1), bad], fetchedCount: 2, nextOffset: 1002 }),
+    savePage(pool, { runId: run.id, pageStart: 1000, works: [work(1), bad], fetchedCount: 2 }),
     (error) => error.code === '23502', // not_null_violation
   );
   assert.equal(await count('works'), 0);
@@ -308,7 +325,7 @@ test('a page saved to a failed (not resumed) run is refused and writes nothing',
   const run = await startImportRun(pool);
   await finishImportRun(pool, run.id, { status: 'failed', errorMessage: 'network' });
   await assert.rejects(
-    savePage(pool, { runId: run.id, works: [work(1)], fetchedCount: 1, nextOffset: 1 }),
+    savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 1 }),
     ImportRunStateError,
   );
   assert.equal(await count('works'), 0);
@@ -318,7 +335,7 @@ test('a page saved to a failed (not resumed) run is refused and writes nothing',
 
 test('a page for an unknown run is rejected and rolled back', async () => {
   await assert.rejects(
-    savePage(pool, { runId: 999, works: [work(1)], fetchedCount: 1, nextOffset: 1 }),
+    savePage(pool, { runId: 999, pageStart: 0, works: [work(1)], fetchedCount: 1 }),
     ImportRunStateError,
   );
   assert.equal(await count('works'), 0);
@@ -326,8 +343,9 @@ test('a page for an unknown run is rejected and rolled back', async () => {
 
 test('a page whose records were all skipped still advances next_offset by the raw count', async () => {
   const run = await startImportRun(pool, { startOffset: 1000 });
-  const result = await savePage(pool, { runId: run.id, works: [], fetchedCount: 1000, nextOffset: 2000 });
-  assert.deepEqual(result, { inserted: 0, updated: 0, unchanged: 0, composersInserted: 0 });
+  const result = await savePage(pool, { runId: run.id, pageStart: 1000, works: [], fetchedCount: 1000 });
+  assert.equal(result.nextOffset, 2000);
+  assert.equal(result.inserted + result.updated + result.unchanged, 0);
   const runRow = await getRun(run.id);
   assert.equal(runRow.next_offset, 2000);
   assert.equal(runRow.works_fetched, 1000);
@@ -335,18 +353,21 @@ test('a page whose records were all skipped still advances next_offset by the ra
 });
 
 test('connections are released after failures (pool of size 1 does not hang)', async () => {
-  const smallPool = testPool({ max: 1, connectionTimeoutMillis: 2_000 });
+  const smallPool = db.makePool({ max: 1, connectionTimeoutMillis: 2_000 });
   try {
     const run = await startImportRun(smallPool);
     for (let i = 0; i < 3; i += 1) {
       await assert.rejects(savePage(smallPool, {
-        runId: run.id, works: [work(1, { title: null })], fetchedCount: 1, nextOffset: 1,
+        runId: run.id, pageStart: 0, works: [work(1, { title: null })], fetchedCount: 1,
       }));
       await assert.rejects(savePage(smallPool, {
-        runId: 999, works: [work(1)], fetchedCount: 1, nextOffset: 1,
+        runId: 999, pageStart: 0, works: [work(1)], fetchedCount: 1,
       }), ImportRunStateError);
+      await assert.rejects(savePage(smallPool, {
+        runId: run.id, pageStart: 7, works: [work(1)], fetchedCount: 1,
+      }), OffsetMismatchError);
     }
-    const ok = await savePage(smallPool, { runId: run.id, works: [work(1)], fetchedCount: 1, nextOffset: 1 });
+    const ok = await savePage(smallPool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 1 });
     assert.equal(ok.inserted, 1);
     assert.equal(smallPool.waitingCount, 0);
     assert.equal(smallPool.idleCount, smallPool.totalCount);
@@ -359,7 +380,7 @@ test('connections are released after failures (pool of size 1 does not hang)', a
 
 test('a failed run can be found, resumed and continued from its next_offset', async () => {
   const run = await startImportRun(pool);
-  await savePage(pool, { runId: run.id, works: [work(1), work(2)], fetchedCount: 3, nextOffset: 3 });
+  await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1), work(2)], fetchedCount: 3 });
   await finishImportRun(pool, run.id, { status: 'failed', errorMessage: 'IMSLP timeout' });
 
   const found = await findResumableRun(pool);
@@ -370,7 +391,7 @@ test('a failed run can be found, resumed and continued from its next_offset', as
 
   // Not resumed yet: saving must be refused.
   await assert.rejects(
-    savePage(pool, { runId: run.id, works: [work(3)], fetchedCount: 1, nextOffset: 4 }),
+    savePage(pool, { runId: run.id, pageStart: 3, works: [work(3)], fetchedCount: 1 }),
     ImportRunStateError,
   );
 
@@ -381,13 +402,12 @@ test('a failed run can be found, resumed and continued from its next_offset', as
   assert.equal(resumed.errorMessage, null);
   assert.equal(resumed.worksFetched, 3, 'progress counters are kept');
 
-  await savePage(pool, { runId: run.id, works: [work(3)], fetchedCount: 1, nextOffset: 4 });
-  const done = await finishImportRun(pool, run.id, { status: 'succeeded' });
+  await savePage(pool, { runId: run.id, pageStart: 3, works: [work(3)], fetchedCount: 1, finish: true });
+  const done = await getRun(run.id);
   assert.equal(done.status, 'succeeded');
-  assert.equal(done.nextOffset, 4);
-  assert.equal(done.worksFetched, 4);
-  assert.equal(done.worksUpserted, 3);
-  assert.ok(done.finishedAt instanceof Date);
+  assert.equal(done.next_offset, 4);
+  assert.equal(done.works_fetched, 4);
+  assert.equal(done.works_upserted, 3);
 
   assert.equal(await findResumableRun(pool), null);
   await assert.rejects(resumeImportRun(pool, run.id), ImportRunStateError);
@@ -395,7 +415,7 @@ test('a failed run can be found, resumed and continued from its next_offset', as
 
 test('an interrupted run left in status running can be found and resumed', async () => {
   const run = await startImportRun(pool, { startOffset: 5000 });
-  await savePage(pool, { runId: run.id, works: [work(1)], fetchedCount: 1000, nextOffset: 6000 });
+  await savePage(pool, { runId: run.id, pageStart: 5000, works: [work(1)], fetchedCount: 1000 });
   // simulate a crash: no finishImportRun
 
   const found = await findResumableRun(pool);
@@ -423,4 +443,20 @@ test('finishImportRun refuses a run that is not running', async () => {
   await finishImportRun(pool, run.id, { status: 'succeeded' });
   await assert.rejects(finishImportRun(pool, run.id, { status: 'failed' }), ImportRunStateError);
   await assert.rejects(finishImportRun(pool, 12345, { status: 'failed' }), ImportRunStateError);
+});
+
+// ---------- importer lock ----------
+
+test('acquireImporterLock: only one holder at a time; released lock can be taken again', async () => {
+  const key = randomInt(1, 2 ** 40); // never the real importer's key
+  const first = await acquireImporterLock(pool, { key });
+  assert.ok(first, 'first caller gets the lock');
+  const second = await acquireImporterLock(pool, { key });
+  assert.equal(second, null, 'second caller is refused while the lock is held');
+  await first.release();
+  const third = await acquireImporterLock(pool, { key });
+  assert.ok(third, 'lock can be taken again after release');
+  await third.release();
+  await third.release(); // releasing twice is harmless
+  assert.equal(pool.idleCount, pool.totalCount, 'lock connections are returned to the pool');
 });

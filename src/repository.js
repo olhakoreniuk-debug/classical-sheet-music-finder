@@ -11,29 +11,55 @@
 // page is stored together with its checkpoint, or nothing is. A failed page
 // never advances next_offset.
 //
+// savePage() only accepts the page that starts exactly at the run's stored
+// next_offset (checked under a row lock), so a page can never be applied twice
+// or out of order, even by two processes working on the same run.
+//
+// The final page of a run is saved with { finish: true }: the run is marked
+// 'succeeded' in that same transaction, so there is no moment where the last
+// page is committed but the run still looks unfinished.
+//
 // Duplicates
 // ----------
 // Within a page: rejected (the parser already removes them).
 // Across pages and runs: ON CONFLICT (permlink) / ON CONFLICT (name) update or
-// keep the existing row, so re-processing a page is always safe.
+// keep the existing row, so importing the same works again is always safe.
 //
 // Run lifecycle
 // -------------
-//   startImportRun()   -> status 'running'
-//   savePage() ...     -> only allowed while 'running'
-//   finishImportRun()  -> 'succeeded' or 'failed'
-//   findResumableRun() -> latest run, if it is not 'succeeded'
-//   resumeImportRun()  -> 'failed' (or interrupted 'running') back to 'running';
-//                         the importer continues from its next_offset.
+//   startImportRun()     -> status 'running'
+//   savePage() ...       -> only allowed while 'running'; finish: true -> 'succeeded'
+//   finishImportRun()    -> 'succeeded' or 'failed'
+//   findResumableRun()   -> latest run, if it is not 'succeeded'
+//   resumeImportRun()    -> 'failed' (or interrupted 'running') back to 'running';
+//                           the importer continues from its next_offset.
+//   acquireImporterLock()-> at most one importer process at a time
 
 import { withTransaction } from './db.js';
 
 const FINISHED_STATUSES = new Set(['succeeded', 'failed']);
 
+// Advisory lock key for the importer (any fixed 64-bit number; must only be
+// unique among advisory locks used in this database).
+export const IMPORTER_LOCK_KEY = 7_312_026_005;
+
 export class ImportRunStateError extends Error {
   constructor(message) {
     super(message);
     this.name = 'ImportRunStateError';
+  }
+}
+
+// The page does not start at the run's stored next_offset: another process
+// already saved it, or the caller lost track of the offset.
+export class OffsetMismatchError extends Error {
+  constructor(runId, expectedOffset, actualOffset) {
+    super(`import run ${runId} expects the next page at offset ${actualOffset}, `
+      + `but a page starting at ${expectedOffset} was given`);
+    this.name = 'OffsetMismatchError';
+    this.runId = runId;
+    this.pageStart = expectedOffset;
+    this.storedNextOffset = actualOffset;
   }
 }
 
@@ -154,9 +180,47 @@ export async function finishImportRun(db, runId, { status, errorMessage = null }
   return toRun(rows[0]);
 }
 
+// ---------- importer lock ----------
+
+// Takes a session-level advisory lock on a dedicated connection, so only one
+// importer process can work at a time. Returns { release() } or, if another
+// session holds the lock, null. If the process dies, PostgreSQL drops the
+// connection and the lock with it.
+export async function acquireImporterLock(pool, { key = IMPORTER_LOCK_KEY } = {}) {
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    const { rows } = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS locked', [key]);
+    locked = rows[0].locked === true;
+  } catch (error) {
+    client.release(error);
+    throw error;
+  }
+  if (!locked) {
+    client.release();
+    return null;
+  }
+
+  let released = false;
+  return {
+    async release() {
+      if (released) return;
+      released = true;
+      try {
+        await client.query('SELECT pg_advisory_unlock($1::bigint)', [key]);
+        client.release();
+      } catch (error) {
+        client.release(error); // destroy the connection; that also drops the lock
+      }
+    },
+  };
+}
+
 // ---------- pages ----------
 
-const LOCK_RUN_SQL = 'SELECT status FROM import_runs WHERE id = $1 FOR UPDATE';
+const LOCK_RUN_SQL = `
+  SELECT status, COALESCE(next_offset, start_offset) AS next_offset
+  FROM import_runs WHERE id = $1 FOR UPDATE`;
 
 const UPSERT_COMPOSERS_SQL = `
   INSERT INTO composers (name)
@@ -199,36 +263,48 @@ const UPDATE_PROGRESS_SQL = `
   UPDATE import_runs
   SET next_offset    = $2,
       works_fetched  = works_fetched + $3,
-      works_upserted = works_upserted + $4
+      works_upserted = works_upserted + $4,
+      status         = CASE WHEN $5::boolean THEN 'succeeded' ELSE status END,
+      finished_at    = CASE WHEN $5::boolean THEN now() ELSE finished_at END
   WHERE id = $1 AND status = 'running'`;
 
 // Saves one parsed page and advances the run's checkpoint, atomically.
 //
+//   pageStart    API offset this page was fetched from; must equal the run's
+//                stored next_offset, otherwise OffsetMismatchError
 //   works        parsed works of the page (may be empty)
 //   fetchedCount number of RAW records the API returned for this page,
 //                including records the parser skipped
-//   nextOffset   API offset of the next page = page start + fetchedCount
-//                (raw count, NOT works.length, so skipped records are not
-//                fetched again and nothing after them is missed)
+//   finish       true for the run's final page: also marks the run 'succeeded'
 //
-// Returns { inserted, updated, unchanged, composersInserted }.
-export async function savePage(pool, { runId, works, fetchedCount, nextOffset }) {
+// The new next_offset is pageStart + fetchedCount (raw count, NOT
+// works.length, so skipped records are not fetched again and nothing after
+// them is missed).
+//
+// Returns { inserted, updated, unchanged, composersInserted, nextOffset, finished }.
+export async function savePage(pool, { runId, pageStart, works, fetchedCount, finish = false }) {
   // Validate before touching the database.
   assertRunId(runId);
+  assertOffset(pageStart, 'pageStart');
   assertOffset(fetchedCount, 'fetchedCount');
-  assertOffset(nextOffset, 'nextOffset');
   assertWorks(works, fetchedCount);
+  if (typeof finish !== 'boolean') throw new TypeError('finish must be a boolean');
+  const nextOffset = pageStart + fetchedCount;
+  assertOffset(nextOffset, 'nextOffset');
 
   const composerNames = [...new Set(
     works.map((work) => work.composerName).filter((name) => name !== null && name !== undefined),
   )];
 
   return withTransaction(pool, async (client) => {
-    // Lock the run row first: fails fast for an unknown or finished run, and
-    // serializes concurrent savePage calls for the same run.
+    // Lock the run row first: fails fast for an unknown or finished run or a
+    // wrong offset, and serializes concurrent savePage calls for the same run.
     const lock = await client.query(LOCK_RUN_SQL, [runId]);
     if (lock.rows.length === 0 || lock.rows[0].status !== 'running') {
       throw new ImportRunStateError(`import run ${runId} does not exist or is not running`);
+    }
+    if (lock.rows[0].next_offset !== pageStart) {
+      throw new OffsetMismatchError(runId, pageStart, lock.rows[0].next_offset);
     }
 
     let composersInserted = 0;
@@ -259,12 +335,19 @@ export async function savePage(pool, { runId, works, fetchedCount, nextOffset })
     // Last step. The status condition is a second guard (the row is already
     // locked); any failure here rolls back the composer and work writes too.
     const progress = await client.query(UPDATE_PROGRESS_SQL, [
-      runId, nextOffset, fetchedCount, inserted + updated,
+      runId, nextOffset, fetchedCount, inserted + updated, finish,
     ]);
     if (progress.rowCount !== 1) {
       throw new ImportRunStateError(`import run ${runId} does not exist or is not running`);
     }
 
-    return { inserted, updated, unchanged: works.length - inserted - updated, composersInserted };
+    return {
+      inserted,
+      updated,
+      unchanged: works.length - inserted - updated,
+      composersInserted,
+      nextOffset,
+      finished: finish,
+    };
   });
 }

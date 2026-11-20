@@ -10,7 +10,9 @@
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
     "test:db": "node --env-file-if-exists=.env --test --test-concurrency=1 \"test/db/*.test.js\"",
-    "fetch:sample": "node --env-file-if-exists=.env scripts/fetch-sample.js"
+    "fetch:sample": "node --env-file-if-exists=.env scripts/fetch-sample.js",
+    "import": "node --env-file-if-exists=.env scripts/import.js",
+    "verify:import": "node --env-file-if-exists=.env scripts/verify-import.js"
   },
   "license": "MIT",
   "dependencies": {

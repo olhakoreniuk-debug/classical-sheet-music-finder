@@ -12,6 +12,7 @@ import {
   finishImportRun,
   findResumableRun,
   ImportRunStateError,
+  OffsetMismatchError,
 } from '../src/repository.js';
 
 // ---------- fakes ----------
@@ -153,13 +154,15 @@ test('withTransaction releases the client when BEGIN fails', async () => {
 
 // ---------- savePage validation (no connection opened) ----------
 
-const validPage = { runId: 1, works: [work('https://imslp.org/wiki/A')], fetchedCount: 1, nextOffset: 1 };
+const validPage = { runId: 1, pageStart: 0, works: [work('https://imslp.org/wiki/A')], fetchedCount: 1 };
 
 for (const [name, override, ErrorType] of [
   ['runId 0', { runId: 0 }, TypeError],
   ['runId as string', { runId: '1' }, TypeError],
-  ['negative nextOffset', { nextOffset: -1 }, RangeError],
-  ['fractional nextOffset', { nextOffset: 1.5 }, RangeError],
+  ['negative pageStart', { pageStart: -1 }, RangeError],
+  ['fractional pageStart', { pageStart: 1.5 }, RangeError],
+  ['missing pageStart', { pageStart: undefined }, RangeError],
+  ['non-boolean finish', { finish: 'yes' }, TypeError],
   ['missing fetchedCount', { fetchedCount: undefined }, RangeError],
   ['fetchedCount below works.length', { fetchedCount: 0 }, RangeError],
   ['works not an array', { works: null }, TypeError],
@@ -175,11 +178,12 @@ for (const [name, override, ErrorType] of [
 
 // ---------- savePage transaction flow (fake database) ----------
 
-// A fake database where run 1 has the given status.
-function pageResponder({ runStatus = 'running', progressRowCount = 1 } = {}) {
+// A fake database where run 1 has the given status and stored next_offset.
+function pageResponder({ runStatus = 'running', storedOffset = 0, progressRowCount = 1 } = {}) {
   return (sql) => {
-    if (sql.startsWith('SELECT status FROM import_runs')) {
-      return { rows: runStatus ? [{ status: runStatus }] : [], rowCount: runStatus ? 1 : 0 };
+    if (sql.startsWith('SELECT status')) {
+      const rows = runStatus ? [{ status: runStatus, next_offset: storedOffset }] : [];
+      return { rows, rowCount: rows.length };
     }
     if (sql.startsWith('INSERT INTO composers')) return { rows: [], rowCount: 1 };
     if (sql.startsWith('INSERT INTO works')) return { rows: [{ inserted: true }], rowCount: 1 };
@@ -192,15 +196,31 @@ test('savePage locks the run, then writes composers, works and progress in one t
   const pool = fakePool({ respond: pageResponder() });
   const result = await savePage(pool, validPage);
   assert.deepEqual(pool.calls, ['BEGIN', 'SELECT', 'INSERT', 'INSERT', 'UPDATE', 'COMMIT']);
-  assert.deepEqual(result, { inserted: 1, updated: 0, unchanged: 0, composersInserted: 1 });
+  assert.deepEqual(result, {
+    inserted: 1, updated: 0, unchanged: 0, composersInserted: 1, nextOffset: 1, finished: false,
+  });
   assert.deepEqual(pool.releases, [undefined]);
 });
 
-test('savePage with no works only advances progress', async () => {
-  const pool = fakePool({ respond: pageResponder() });
-  const result = await savePage(pool, { runId: 1, works: [], fetchedCount: 5, nextOffset: 5 });
+test('savePage with no works only advances progress by the raw count', async () => {
+  const pool = fakePool({ respond: pageResponder({ storedOffset: 10 }) });
+  const result = await savePage(pool, { runId: 1, pageStart: 10, works: [], fetchedCount: 5 });
   assert.deepEqual(pool.calls, ['BEGIN', 'SELECT', 'UPDATE', 'COMMIT']);
-  assert.deepEqual(result, { inserted: 0, updated: 0, unchanged: 0, composersInserted: 0 });
+  assert.deepEqual(result, {
+    inserted: 0, updated: 0, unchanged: 0, composersInserted: 0, nextOffset: 15, finished: false,
+  });
+});
+
+test('savePage rejects a page that does not start at the stored next_offset, before writing', async () => {
+  const pool = fakePool({ respond: pageResponder({ storedOffset: 20 }) });
+  await assert.rejects(savePage(pool, { ...validPage, pageStart: 10 }), (error) => {
+    assert.ok(error instanceof OffsetMismatchError);
+    assert.equal(error.pageStart, 10);
+    assert.equal(error.storedNextOffset, 20);
+    return true;
+  });
+  assert.deepEqual(pool.calls, ['BEGIN', 'SELECT', 'ROLLBACK']);
+  assert.deepEqual(pool.releases, [undefined]);
 });
 
 for (const runStatus of ['failed', 'succeeded', null]) {
