@@ -1,0 +1,17 @@
+{
+  "name": "classical-sheet-music-finder",
+  "version": "0.1.0",
+  "description": "Imports classical sheet music metadata from the IMSLP API into PostgreSQL.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "pg": "^8.23.1"
+  }
+}
