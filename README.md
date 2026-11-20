@@ -13,6 +13,8 @@ fetches, cleans and safely stores the data.
 
 ## Contents
 
+- [Why IMSLP](#why-imslp)
+- [What surprised us in the data](#what-surprised-us-in-the-data)
 - [What it does today](#what-it-does-today)
 - [Architecture](#architecture)
 - [Technologies](#technologies)
@@ -26,10 +28,50 @@ fetches, cleans and safely stores the data.
 - [How the importer stays safe](#how-the-importer-stays-safe)
 - [Where the data lives](#where-the-data-lives)
 - [Limitations and future work](#limitations-and-future-work)
-- [Publishing to GitHub: privacy and secrets checklist](#publishing-to-github-privacy-and-secrets-checklist)
 - [Data source](#data-source)
 
 A step-by-step live demonstration script is in [docs/DEMO.md](docs/DEMO.md).
+
+## Why IMSLP
+
+- **It is about classical music.** Every record describes a classical work:
+  title, composer, catalogue number and a link to its IMSLP page. That is
+  exactly the metadata a sheet music finder needs.
+- **It has a public API.** The worklist API returns JSON over HTTPS and needs
+  no API key (requests must include `disclaimer=accepted`). Documentation:
+  <https://imslp.org/wiki/IMSLP:API>.
+- **It is large enough to be worth browsing.** IMSLP lists about 269,000 works.
+- **It supports pagination.** Works are requested in pages (`start`, `limit`)
+  in a fixed sort order (`sort=id`), and each response says whether more results
+  are available. That makes a resumable, page-by-page import possible.
+- **It fits a structured catalogue.** Each work has a unique link to its page
+  (`permlink`) and a composer name, which map naturally to `works` and
+  `composers` tables with a unique key for idempotent imports.
+
+This project stores metadata only, not scores, and respects IMSLP's
+`robots.txt` crawl delay. Check IMSLP's own terms before reusing its content.
+
+## What surprised us in the data
+
+All of these were seen in real API responses while building the importer:
+
+- **Parameters are separated by `/`, not `&`:**
+  `API.ISCR.php?account=worklist/disclaimer=accepted/sort=id/type=2/start=0/limit=10/retformat=json`.
+  `limit` is not documented; the largest value IMSLP accepts is 1000.
+- **Errors can arrive as HTTP 200.** Some application errors return status 200
+  with a JSON *string* as the whole body (and `Content-Type: text/plain`), so
+  the client cannot trust the status code alone.
+- **Works are not a JSON array.** They come as an object keyed `"0"`, `"1"`,
+  ... plus a `metadata` key. The keys must be sorted numerically (`"10"` comes
+  after `"9"`, not after `"1"`).
+- **Catalogue numbers are often absent.** `intvals.icatno` may be missing or an
+  empty string `""`; 6 of our first 10 works have none.
+- **Permlinks contain literal quotation marks**, for example
+  `https://imslp.org/wiki/"A"_(Ferrari,_Carlotta)`. All 10 works at the start
+  of the list have titles that begin with `"`.
+- **Types are mixed.** Work fields (including `id`, `type` and `pageid`) are
+  strings, while `metadata.start`, `metadata.limit` and `metadata.timestamp`
+  are numbers and `metadata.moreresultsavailable` is a boolean.
 
 ## What it does today
 
@@ -137,7 +179,7 @@ project is already set up (Docker volume with data, `.env` present), skip to
 
 ```powershell
 # 1. Get the code
-git clone <repository-url> classical-sheet-music-finder
+git clone https://github.com/olhakoreniuk-debug/classical-sheet-music-finder.git
 cd classical-sheet-music-finder
 
 # 2. Install Node.js 24.17.0 (mise may first ask you to trust .mise.toml)
@@ -306,43 +348,16 @@ Neither test suite makes requests to IMSLP; HTTP is replaced by fakes.
 ## Inspecting the data with SQL
 
 Open `psql` as shown in [Starting and stopping PostgreSQL](#starting-and-stopping-postgresql),
-then paste any of these queries. They only read data.
-
-**Composers, with how many works each has:**
-
-```sql
-SELECT c.name AS composer, count(w.id) AS works
-FROM composers c
-LEFT JOIN works w ON w.composer_id = c.id
-GROUP BY c.name
-ORDER BY c.name;
-```
+then paste any of these queries. They only read data. More queries are in
+[docs/DEMO.md](docs/DEMO.md#a3-look-at-the-data-with-sql-about-3-minutes).
 
 **Works with their composer:**
 
 ```sql
-SELECT c.name AS composer, w.title, w.catalogue_number, w.imslp_page_id
+SELECT c.name AS composer, w.title, w.catalogue_number, w.permlink
 FROM works w
 LEFT JOIN composers c ON c.id = w.composer_id
 ORDER BY w.imslp_id;
-```
-
-**Works with a catalogue number:**
-
-```sql
-SELECT c.name AS composer, w.title, w.catalogue_number
-FROM works w
-JOIN composers c ON c.id = w.composer_id
-WHERE w.catalogue_number IS NOT NULL
-ORDER BY c.name;
-```
-
-**Links to the IMSLP pages:**
-
-```sql
-SELECT w.title, w.permlink
-FROM works w
-ORDER BY w.title;
 ```
 
 **Import history:**
@@ -352,22 +367,6 @@ SELECT id, status, start_offset, next_offset, works_fetched, works_upserted,
        started_at, finished_at, error_message
 FROM import_runs
 ORDER BY id;
-```
-
-**Which run last inserted or changed each work, and when:**
-
-```sql
-SELECT w.title, w.last_import_run_id AS run, w.created_at, w.updated_at
-FROM works w
-ORDER BY w.last_import_run_id, w.title;
-```
-
-**Totals:**
-
-```sql
-SELECT (SELECT count(*) FROM composers)   AS composers,
-       (SELECT count(*) FROM works)       AS works,
-       (SELECT count(*) FROM import_runs) AS import_runs;
 ```
 
 **Ad-hoc title lookup** (plain SQL pattern matching; this is *not* the planned
@@ -395,13 +394,34 @@ WHERE w.title ILIKE '%waltz%';
   wrong offset, more records than requested, or an empty page while IMSLP still
   reports more results all stop the import before that page is saved (pages
   saved earlier stay saved, and the run can be resumed).
-- **Bad records:** a record missing a required field (`permlink`, `id`, title) or
-  with a non-IMSLP permlink is **skipped with a reason**. The import summary
-  lists up to 5 examples, and the rest of the page is still imported. Missing
-  optional fields (composer, catalogue number, page id, parent) are stored as
-  `NULL`.
+- **Bad records:** handled by the parser, see below. One bad record never stops
+  the import.
 - **Failures are recorded:** a failed run is marked `failed` in `import_runs`
   with its `error_message`, and the importer exits with code 1.
+
+### Parser decisions: missing fields, dates and time zones
+
+The parser (`src/parser.js`) checks every record on its own:
+
+- **Required fields missing or invalid → the record is skipped with a reason.**
+  Required are `permlink` (must be an `http(s)` URL on `imslp.org`), `id`, the
+  title (`intvals.worktitle`) and an `intvals` object; `type`, if present, must
+  be `"2"`. A second record with the same permlink in one page is also skipped.
+  The import summary shows up to 5 examples; the rest of the page is still saved.
+- **Optional fields missing or invalid → stored as `NULL`** and the record is
+  kept: composer, catalogue number, page id and parent.
+- **Page ids are validated before conversion:** only a string of digits that
+  gives a positive safe integer is converted to a number; anything else
+  becomes `NULL`.
+- **Text is only trimmed**, never otherwise changed, so accents and non-Latin
+  names are stored exactly as IMSLP sends them.
+- **Dates and time zones:** the only date IMSLP sends is
+  `metadata.timestamp`, in Unix seconds. The parser converts it to a UTC
+  JavaScript `Date`. The work records themselves have **no date field** (no
+  composition or publication date), so there is no work date to store. The
+  database's own timestamps (`created_at`, `updated_at`, `started_at`,
+  `finished_at`) are `TIMESTAMPTZ`, set by PostgreSQL, so they are unambiguous
+  in any time zone.
 
 ### Rate limiting
 
@@ -436,6 +456,22 @@ resumed run neither re-fetches nor misses anything. After a failure or Ctrl+C:
 mise exec -- npm run import -- --resume
 ```
 
+> **Known limitation: `--resume` uses the current command's `--limit`.** A run
+> does not remember the limit it was started with. `--limit` always means "raw
+> records to fetch *in this command*", and its default is 10. If an import
+> started with `--limit 3000` is interrupted after 1,000 records and resumed with
+> plain `--resume`, it fetches only **10 more** records, then marks the run
+> `succeeded` ("limit reached"). Nothing is duplicated or lost, but the original
+> target is not reached. Always pass the remainder explicitly:
+>
+> ```powershell
+> mise exec -- npm run import -- --resume --limit 2000   # 3000 target - 1000 already fetched
+> ```
+>
+> `works_fetched` in `import_runs` shows how many records the run has fetched so
+> far. If a run already ended early this way, continue with a new run from its
+> `next_offset`: `npm run import -- --start <next_offset> --limit <remaining>`.
+
 ## Where the data lives
 
 - **Git stores the code; Docker stores the data.** The imported composers,
@@ -459,6 +495,8 @@ mise exec -- npm run import -- --resume
 - Only work records (`type=2`) and only the fields listed in the schema are
   stored. Composer names are stored exactly as IMSLP writes them; there is no
   name normalization or composer metadata (dates, nationality).
+- `--resume` does not remember the original `--limit` (see
+  [Resuming an import](#resuming-an-import)).
 - No database migration tool; schema changes need manual handling.
 - Usable through the command line and SQL only.
 
@@ -474,47 +512,6 @@ mise exec -- npm run import -- --resume
   fetch.
 - **A user interface** (web) on top of the search.
 - **Schema migrations** and scheduled incremental updates.
-
-## Publishing to GitHub: privacy and secrets checklist
-
-Run these checks before the first push. None of them change anything.
-
-```powershell
-# 1. .env must be ignored and never have been committed
-git check-ignore -v .env              # expected: .gitignore:2:.env  .env
-git ls-files                          # .env must NOT be listed (only .env.example)
-git log --all --oneline -- .env       # expected: no output
-
-# 2. Search the full history for anything that looks like a secret
-git log --all -p | Select-String -Pattern 'password|secret|token|api[_-]?key' |
-    Select-String -NotMatch 'POSTGRES_PASSWORD|change_me'
-
-# 3. Which author email addresses are in the history?
-git log --all --format='%an <%ae>' | Sort-Object -Unique
-git config user.email
-```
-
-### Author email privacy
-
-Every Git commit contains the author's email address, and GitHub shows it
-publicly. If check 3 shows a **personal** address, fix it **before the first
-push**; afterwards the address is public in the history.
-
-Recommended procedure (to be done as a separate, reviewed step):
-
-1. On GitHub, open *Settings → Emails*, enable **Keep my email addresses
-   private** and copy your noreply address (format:
-   `<id>+<username>@users.noreply.github.com`). Use the exact address GitHub
-   shows; do not construct it by hand.
-2. Optionally enable **Block command line pushes that expose my email**.
-3. Use that address for future commits in this repository:
-   `git config user.email "<your-noreply-address>"`.
-4. Rewrite the author and committer email of the existing commits to the
-   noreply address, for example with a history-rewriting tool such as
-   `git filter-repo` and a mailmap, or an interactive rebase. This changes
-   every commit hash, so do it **only before** the repository has been pushed
-   or shared.
-5. Re-run check 3 and confirm that only the noreply address remains.
 
 ## Data source
 

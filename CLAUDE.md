@@ -17,7 +17,8 @@ Imports classical work metadata from the IMSLP API into PostgreSQL (Docker). Goa
 - Public repo: never commit `.env`, passwords or keys. Only `.env.example` with placeholders.
 - Verify a package exists and is legitimate before installing it.
 - Do not invent API endpoints or fields; use only the verified facts below.
-- Never run the full import (`--all`) without the owner's explicit approval.
+- Never import the full IMSLP catalogue without the owner's explicit approval.
+  There is no full-import option; one run fetches at most `--limit` records (default 10, max 5000).
 
 ## IMSLP API (verified with live requests, 2026-11-20)
 - Docs: https://imslp.org/wiki/IMSLP:API
