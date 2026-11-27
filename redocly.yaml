@@ -1,0 +1,9 @@
+# Redocly CLI configuration for `npx @redocly/cli lint openapi.yaml`.
+# Uses the built-in "recommended" ruleset with one documented exception.
+extends:
+  - recommended
+
+rules:
+  # The project owner decided not to publish a licence for this repository,
+  # so the OpenAPI document deliberately has no `info.license`.
+  info-license: off

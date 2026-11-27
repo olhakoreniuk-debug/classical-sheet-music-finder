@@ -1,0 +1,925 @@
+openapi: 3.1.0
+
+info:
+  title: Classical Sheet Music Finder API
+  version: 1.0.0
+  summary: Browse, search and extend a catalogue of classical music works from several sources.
+  description: |
+    REST API for the Classical Sheet Music Finder catalogue. The catalogue is
+    filled from several **sources**: external providers such as IMSLP (and,
+    later, OpenScore Lieder) and works added manually. This API lets clients
+    list, filter and read works, list the available sources, and add a work
+    manually.
+
+    This document is the **contract**. It is written before the server and the
+    frontend, and both are built from it. Changes to the contract are recorded
+    in an Architecture Decision Record (`docs/adr/`) before they are implemented.
+
+    ## Source-neutral model
+
+    Works from every source have the same shape. Provider-specific details are
+    not part of the contract: a work only says **which** source it comes from
+    (`source`), the source's own identifier for the record (`sourceRecordId`),
+    a link to the record at the source (`pageUrl`) and the text that must be
+    shown to credit the source (`attribution`). New sources appear in
+    `GET /sources`; clients must not hard-code the list of sources.
+
+    ## Conventions
+
+    - **Media type:** requests and successful responses use `application/json`.
+      All errors use `application/problem+json` (RFC 9457, Problem Details).
+    - **Field names** are camelCase. Work and composer identifiers are positive
+      64-bit integers; sources are identified by a short lowercase `code`.
+    - **Nullable fields are always present.** A field that has no value is
+      returned as `null`; it is never omitted. Each schema states which fields
+      may be `null`.
+    - **Timestamps** are RFC 3339 date-times in UTC, e.g. `2026-11-20T22:10:49Z`.
+    - **Text** is returned exactly as stored (trimmed, no other normalisation),
+      so accents and non-Latin scripts are preserved. Clients must display text
+      as text, never interpret it as HTML.
+    - **Attribution:** whenever a work is displayed and its `attribution` is not
+      `null`, clients must show that text with it.
+    - **Pagination** uses `limit` and `offset`. Every paginated response contains
+      the total number of matching items and links to the next and previous pages.
+    - **Unknown query parameters are rejected** with `400` (code
+      `unknown_parameter`), as unknown body properties are, so that mistyped
+      parameters are reported instead of silently ignored.
+    - **Errors:** `400` for an invalid or unknown query parameter, an invalid
+      path parameter, a malformed JSON body or an invalid header; `403` when the server does not allow the
+      operation; `404` for an unknown resource; `409` for a conflict with the
+      current state; `413` for a request body that is too large; `415` for a
+      wrong request media type; `422` for a well-formed request body that fails
+      validation; and `500` for an unexpected server error. Validation problems
+      list every invalid field in `errors`.
+
+servers:
+  - url: /api/v1
+    description: Relative to the host that serves the API (during local development, http://localhost:3000).
+
+tags:
+  - name: Sources
+    description: |
+      The sources that works come from, with the attribution and licence
+      information that clients need to credit them.
+  - name: Works
+    description: |
+      Classical music works in the catalogue, each with an optional composer,
+      catalogue number and link to the work's page at its source.
+
+paths:
+  /works:
+    get:
+      operationId: listWorks
+      summary: List works
+      description: |
+        Returns a page of works from all sources. All filters are optional and
+        are combined with AND. Results are ordered by `sort`, with the work `id`
+        as a tie-breaker so that pagination is stable. A filter that matches
+        nothing (including an unknown `source` code) returns `200` with an empty
+        `data` array.
+      tags:
+        - Works
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Query'
+        - $ref: '#/components/parameters/ComposerFilter'
+        - $ref: '#/components/parameters/HasCatalogueNumber'
+        - $ref: '#/components/parameters/SourceFilter'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: A page of works (possibly empty).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkPage'
+              examples:
+                firstPage:
+                  $ref: '#/components/examples/WorkPageExample'
+                noMatches:
+                  $ref: '#/components/examples/EmptyWorkPageExample'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      operationId: createWork
+      summary: Add a work manually
+      description: |
+        Adds a work that is not provided by an external source. The new work
+        belongs to the source `manual`. Works imported from external sources
+        cannot be created or changed through this API, and imports never
+        overwrite manually added works.
+
+        **Duplicates:** if any work, from any source, already has the same
+        `pageUrl`, the request fails with `409`.
+
+        **Idempotency (optional header):** send an `Idempotency-Key` to make
+        retries safe.
+        - The first request with a key is processed normally.
+        - A repeat with the same key and an identical body within 24 hours does
+          not create another work: it returns the original `201` response again,
+          with the header `Idempotent-Replayed: true`.
+        - A repeat with the same key but a different body returns `422`
+          (`idempotency_key_reused`).
+        - A repeat while the first request is still being processed returns `409`.
+
+        **Access:** writes are disabled unless the server is explicitly
+        configured to allow them (`403` otherwise). The server only accepts
+        same-origin `application/json` requests. There is no user
+        authentication yet, so this operation must not be exposed on a
+        publicly reachable server.
+      tags:
+        - Works
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        description: The work to add. At most 16 KB.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkRequest'
+            examples:
+              complete:
+                summary: All fields
+                value:
+                  title: Erlkönig
+                  composerName: Schubert, Franz
+                  catalogueNumber: D.328
+                  pageUrl: https://example.org/works/erlkoenig-d328
+              minimal:
+                summary: Title only; optional fields are null
+                value:
+                  title: Untitled song
+                  composerName: null
+                  catalogueNumber: null
+                  pageUrl: null
+      responses:
+        '201':
+          description: The work was created (or, with an idempotency key, an earlier creation is replayed).
+          headers:
+            Location:
+              description: URL of the new work.
+              schema:
+                type: string
+                format: uri-reference
+                example: /api/v1/works/42
+            Idempotent-Replayed:
+              description: Present with the value `true` only when this response replays an earlier request with the same `Idempotency-Key`.
+              schema:
+                type: string
+                enum:
+                  - 'true'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Work'
+              examples:
+                created:
+                  $ref: '#/components/examples/ManualWorkExample'
+        '400':
+          $ref: '#/components/responses/MalformedRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /works/{workId}:
+    get:
+      operationId: getWork
+      summary: Get one work
+      description: Returns a single work by its identifier.
+      tags:
+        - Works
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/WorkId'
+      responses:
+        '200':
+          description: The work.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Work'
+              examples:
+                importedWork:
+                  $ref: '#/components/examples/ImportedWorkExample'
+                manualWork:
+                  $ref: '#/components/examples/ManualWorkExample'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sources:
+    get:
+      operationId: listSources
+      summary: List sources
+      description: |
+        Returns every source that works can come from, ordered by `name`.
+        Clients use this list, for example, to build a source filter and to show
+        attribution and licence information. The list is short, so it is not
+        paginated. This operation accepts no query parameters; any query
+        parameter is rejected with `400`.
+      tags:
+        - Sources
+      security: []
+      responses:
+        '200':
+          description: All sources.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceList'
+              examples:
+                current:
+                  $ref: '#/components/examples/SourceListExample'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    Query:
+      name: q
+      in: query
+      description: Case-insensitive search for this text anywhere in the work title.
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      example: waltz
+    ComposerFilter:
+      name: composer
+      in: query
+      description: Case-insensitive search for this text anywhere in the composer's name (as stored, e.g. `Ferrari, Carlotta`).
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      example: ferrari
+    HasCatalogueNumber:
+      name: hasCatalogueNumber
+      in: query
+      description: '`true` returns only works with a catalogue number, `false` only works without one.'
+      required: false
+      schema:
+        type: boolean
+    SourceFilter:
+      name: source
+      in: query
+      description: Only works from the source with this `code`. Valid codes are listed by `GET /sources`.
+      required: false
+      schema:
+        $ref: '#/components/schemas/SourceCode'
+    Sort:
+      name: sort
+      in: query
+      description: Sort order. A leading `-` means descending. Ties are broken by `id` ascending.
+      required: false
+      schema:
+        type: string
+        enum:
+          - title
+          - -title
+          - createdAt
+          - -createdAt
+        default: title
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of works in the page.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      description: Number of matching works to skip before the page starts.
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 2147483647
+        default: 0
+    WorkId:
+      name: workId
+      in: path
+      description: Identifier of the work.
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+      example: 3
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: Optional client-generated key (a UUID is recommended) that makes retries of this request safe. See the operation description.
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: '^[\x21-\x7E]+$'
+      example: 0f8fad5b-d9cb-469f-a165-70867728950e
+
+  schemas:
+    Id:
+      type: integer
+      format: int64
+      minimum: 1
+      description: Positive identifier assigned by the server.
+
+    SourceCode:
+      type: string
+      description: Short, stable code of a source, e.g. `imslp` or `manual`. More sources will be added; clients must accept any value and use `GET /sources` for the current list.
+      pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+      minLength: 1
+      maxLength: 50
+      examples:
+        - imslp
+
+    SourceKind:
+      type: string
+      description: '`external` for sources imported from an outside provider, `manual` for works added through this API.'
+      enum:
+        - external
+        - manual
+
+    SourceReference:
+      type: object
+      description: Identifies the source of a work. Full details are available from `GET /sources`.
+      required:
+        - code
+        - name
+      properties:
+        code:
+          $ref: '#/components/schemas/SourceCode'
+        name:
+          type: string
+          minLength: 1
+          description: Human-readable name of the source.
+          examples:
+            - IMSLP
+      additionalProperties: false
+
+    Source:
+      type: object
+      description: A source of works.
+      required:
+        - code
+        - name
+        - kind
+        - homepageUrl
+        - attribution
+        - metadataLicence
+      properties:
+        code:
+          $ref: '#/components/schemas/SourceCode'
+        name:
+          type: string
+          minLength: 1
+          description: Human-readable name of the source.
+        kind:
+          $ref: '#/components/schemas/SourceKind'
+        homepageUrl:
+          type:
+            - string
+            - 'null'
+          format: uri
+          description: The source's website, or `null` (for example for manually added works).
+        attribution:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Text that must be shown with data from this source, or `null` if none is required.
+        metadataLicence:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Licence of this source's metadata as an SPDX identifier (e.g. `CC0-1.0`), or `null` if it has not been established.
+      additionalProperties: false
+
+    SourceList:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+      additionalProperties: false
+
+    Composer:
+      type: object
+      description: A composer, with the name exactly as the source writes it (usually "Family name, Given names").
+      required:
+        - id
+        - name
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+          minLength: 1
+          examples:
+            - Ferrari, Carlotta
+      additionalProperties: false
+
+    Work:
+      type: object
+      description: A classical music work from any source. Every property is always present; nullable properties are `null` when there is no value.
+      required:
+        - id
+        - title
+        - composer
+        - catalogueNumber
+        - pageUrl
+        - source
+        - sourceRecordId
+        - attribution
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        title:
+          type: string
+          minLength: 1
+          description: Title as stored, trimmed.
+        composer:
+          description: The composer, or `null` if the source did not name one.
+          oneOf:
+            - $ref: '#/components/schemas/Composer'
+            - type: 'null'
+        catalogueNumber:
+          type:
+            - string
+            - 'null'
+          description: Catalogue number such as `BWV 1007` or `D.328`, or `null` if none is known.
+        pageUrl:
+          type:
+            - string
+            - 'null'
+          format: uri
+          description: |
+            Link to the work's page at its source, or `null` if there is none.
+            Characters that are not allowed in a URI (some source page names
+            contain literal quotation marks) are percent-encoded, e.g. `%22`.
+        source:
+          $ref: '#/components/schemas/SourceReference'
+        sourceRecordId:
+          type: string
+          minLength: 1
+          description: The source's own identifier for this record. Unique within the source; its format depends on the source and must be treated as opaque text.
+        attribution:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Text that must be shown with this work to credit its source, or `null` if none is required.
+        createdAt:
+          type: string
+          format: date-time
+          description: When the work was first stored (UTC).
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the work's data last changed (UTC).
+      additionalProperties: false
+
+    PageInfo:
+      type: object
+      required:
+        - limit
+        - offset
+        - total
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: The limit applied to this page.
+        offset:
+          type: integer
+          minimum: 0
+          description: The offset applied to this page.
+        total:
+          type: integer
+          minimum: 0
+          description: Total number of works matching the filters.
+      additionalProperties: false
+
+    PageLinks:
+      type: object
+      description: Relative links that repeat the current filters and sort order.
+      required:
+        - self
+        - next
+        - prev
+      properties:
+        self:
+          type: string
+          minLength: 1
+          format: uri-reference
+        next:
+          type:
+            - string
+            - 'null'
+          format: uri-reference
+          description: Link to the next page, or `null` on the last page.
+        prev:
+          type:
+            - string
+            - 'null'
+          format: uri-reference
+          description: Link to the previous page, or `null` on the first page.
+      additionalProperties: false
+
+    WorkPage:
+      type: object
+      required:
+        - data
+        - page
+        - links
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Work'
+        page:
+          $ref: '#/components/schemas/PageInfo'
+        links:
+          $ref: '#/components/schemas/PageLinks'
+      additionalProperties: false
+
+    CreateWorkRequest:
+      type: object
+      description: |
+        A work to add manually. Leading and trailing spaces are removed before
+        validation. Unknown properties are rejected. The source is always
+        `manual` and cannot be chosen by the client.
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+          pattern: '\S'
+          description: Title of the work; must contain a non-space character.
+        composerName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 200
+          pattern: '\S'
+          description: Composer name, preferably "Family name, Given names". `null` or omitted if unknown. An existing composer with exactly this name is reused.
+        catalogueNumber:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 100
+          pattern: '\S'
+          description: Catalogue number, or `null` or omitted if none.
+        pageUrl:
+          type:
+            - string
+            - 'null'
+          format: uri
+          maxLength: 2000
+          pattern: '^https?://'
+          description: An http(s) link to a page about the work, or `null` or omitted. Must not already belong to another work.
+      additionalProperties: false
+
+    FieldError:
+      type: object
+      description: One validation problem.
+      required:
+        - location
+        - field
+        - code
+        - message
+      properties:
+        location:
+          type: string
+          enum:
+            - body
+            - query
+            - path
+            - header
+          description: Where the invalid value was sent.
+        field:
+          type: string
+          minLength: 1
+          description: The invalid field. For the body, a JSON Pointer such as `/title`; otherwise the parameter or header name.
+          examples:
+            - /title
+        code:
+          type: string
+          minLength: 1
+          description: Machine-readable reason, e.g. `required`, `too_long`, `blank`, `invalid_format`, `unknown_field`, `unknown_parameter`, `out_of_range`, `idempotency_key_reused`.
+          examples:
+            - too_long
+        message:
+          type: string
+          minLength: 1
+          description: Human-readable explanation that a client may show next to the field.
+          examples:
+            - Title must be at most 500 characters.
+      additionalProperties: false
+
+    Problem:
+      type: object
+      description: Error response in the RFC 9457 Problem Details format. Every error uses this shape.
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          minLength: 1
+          format: uri-reference
+          description: Identifies the kind of problem; `about:blank` when only the status code applies.
+          examples:
+            - https://classical-sheet-music-finder.local/problems/validation
+        title:
+          type: string
+          minLength: 1
+          description: Short, human-readable summary of the kind of problem.
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+          description: The HTTP status code, repeated for convenience.
+        detail:
+          type: string
+          description: Explanation specific to this occurrence.
+        instance:
+          type: string
+          format: uri-reference
+          description: The request path that caused the problem.
+        errors:
+          type: array
+          description: Present for validation problems; lists every invalid field.
+          items:
+            $ref: '#/components/schemas/FieldError'
+
+  responses:
+    InvalidRequest:
+      description: A query or path parameter is invalid, or a query parameter is not defined for this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/invalid-parameter
+            title: Invalid request parameter
+            status: 400
+            detail: One or more parameters are invalid.
+            instance: /api/v1/works?limit=500
+            errors:
+              - location: query
+                field: limit
+                code: out_of_range
+                message: limit must be between 1 and 100.
+    MalformedRequest:
+      description: The request body is not valid JSON, a header (such as `Idempotency-Key`) is invalid, or a query parameter is sent (this operation accepts none).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/malformed-request
+            title: Malformed request
+            status: 400
+            detail: The request body is not valid JSON.
+            instance: /api/v1/works
+    Forbidden:
+      description: |
+        The server does not allow this operation: writes are disabled in this
+        server's configuration, or the request does not come from the same
+        origin as the server.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/writes-disabled
+            title: Writes are disabled
+            status: 403
+            detail: This server does not accept changes.
+            instance: /api/v1/works
+    NotFound:
+      description: No work exists with this identifier.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/not-found
+            title: Work not found
+            status: 404
+            detail: There is no work with id 999.
+            instance: /api/v1/works/999
+    Conflict:
+      description: |
+        The request conflicts with the current state: another work already has
+        this `pageUrl`, or a request with the same `Idempotency-Key` is still
+        being processed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/duplicate-work
+            title: Work already exists
+            status: 409
+            detail: Work 3 already has this pageUrl.
+            instance: /api/v1/works
+    PayloadTooLarge:
+      description: The request body is larger than 16 KB.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/payload-too-large
+            title: Request body too large
+            status: 413
+            detail: The request body must not exceed 16 KB.
+            instance: /api/v1/works
+    UnsupportedMediaType:
+      description: The request body is not sent as `application/json`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/unsupported-media-type
+            title: Unsupported media type
+            status: 415
+            detail: Send the request body as application/json.
+            instance: /api/v1/works
+    ValidationFailed:
+      description: The JSON body is well-formed but fails validation; every invalid field is listed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://classical-sheet-music-finder.local/problems/validation
+            title: Validation failed
+            status: 422
+            detail: 2 fields are invalid.
+            instance: /api/v1/works
+            errors:
+              - location: body
+                field: /title
+                code: blank
+                message: Title must contain at least one non-space character.
+              - location: body
+                field: /pageUrl
+                code: invalid_format
+                message: pageUrl must be an http or https URL.
+    InternalError:
+      description: An unexpected error occurred. No details about the server are revealed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: Internal Server Error
+            status: 500
+            instance: /api/v1/works
+
+  examples:
+    ImportedWorkExample:
+      summary: A work imported from an external source (real stored data)
+      value:
+        id: 3
+        title: '"A"'
+        composer:
+          id: 4
+          name: Ferrari, Carlotta
+        catalogueNumber: ICF 1237
+        pageUrl: https://imslp.org/wiki/%22A%22_(Ferrari,_Carlotta)
+        source:
+          code: imslp
+          name: IMSLP
+        sourceRecordId: https://imslp.org/wiki/"A"_(Ferrari,_Carlotta)
+        attribution: Data from IMSLP, the Petrucci Music Library (imslp.org).
+        createdAt: '2026-11-20T22:10:49Z'
+        updatedAt: '2026-11-20T22:10:49Z'
+    ManualWorkExample:
+      summary: A work added manually
+      value:
+        id: 42
+        title: Erlkönig
+        composer:
+          id: 17
+          name: Schubert, Franz
+        catalogueNumber: D.328
+        pageUrl: https://example.org/works/erlkoenig-d328
+        source:
+          code: manual
+          name: Added manually
+        sourceRecordId: 6d1f3c2a-8a4e-4b7e-9f0d-2c5b1a7e9d10
+        attribution: null
+        createdAt: '2026-12-01T10:00:00Z'
+        updatedAt: '2026-12-01T10:00:00Z'
+    WorkPageExample:
+      summary: First page, two works per page (real stored data)
+      value:
+        data:
+          - id: 3
+            title: '"A"'
+            composer:
+              id: 4
+              name: Ferrari, Carlotta
+            catalogueNumber: ICF 1237
+            pageUrl: https://imslp.org/wiki/%22A%22_(Ferrari,_Carlotta)
+            source:
+              code: imslp
+              name: IMSLP
+            sourceRecordId: https://imslp.org/wiki/"A"_(Ferrari,_Carlotta)
+            attribution: Data from IMSLP, the Petrucci Music Library (imslp.org).
+            createdAt: '2026-11-20T22:10:49Z'
+            updatedAt: '2026-11-20T22:10:49Z'
+          - id: 4
+            title: '"Amicizia"'
+            composer:
+              id: 5
+              name: Stankovych, Tatiana
+            catalogueNumber: null
+            pageUrl: https://imslp.org/wiki/%22Amicizia%22_(Stankovych,_Tatiana)
+            source:
+              code: imslp
+              name: IMSLP
+            sourceRecordId: https://imslp.org/wiki/"Amicizia"_(Stankovych,_Tatiana)
+            attribution: Data from IMSLP, the Petrucci Music Library (imslp.org).
+            createdAt: '2026-11-20T22:10:49Z'
+            updatedAt: '2026-11-20T22:10:49Z'
+        page:
+          limit: 2
+          offset: 0
+          total: 10
+        links:
+          self: /api/v1/works?sort=title&limit=2&offset=0
+          next: /api/v1/works?sort=title&limit=2&offset=2
+          prev: null
+    EmptyWorkPageExample:
+      summary: No works match the filters
+      value:
+        data: []
+        page:
+          limit: 20
+          offset: 0
+          total: 0
+        links:
+          self: /api/v1/works?q=nonexistent&sort=title&limit=20&offset=0
+          next: null
+          prev: null
+    SourceListExample:
+      summary: Sources after migration 0002
+      value:
+        data:
+          - code: manual
+            name: Added manually
+            kind: manual
+            homepageUrl: null
+            attribution: null
+            metadataLicence: null
+          - code: imslp
+            name: IMSLP
+            kind: external
+            homepageUrl: https://imslp.org
+            attribution: Data from IMSLP, the Petrucci Music Library (imslp.org).
+            metadataLicence: null
