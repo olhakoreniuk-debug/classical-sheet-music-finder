@@ -1,0 +1,32 @@
+%%{init: {"theme": "base", "htmlLabels": false, "flowchart": {"htmlLabels": false, "curve": "basis", "nodeSpacing": 35, "rankSpacing": 55}, "themeVariables": {"fontFamily": "Arial", "fontSize": "15px", "lineColor": "#5b6577", "primaryTextColor": "#1f2933"}}}%%
+%% FINAL v2: implementation roadmap T1-T8. Executed in number order, one task per session,
+%% commit before each task. Arrows show real technical dependencies.
+%% "Decide" lines name the open decisions (D-1 ... D-7) that the owner must answer before that task.
+
+flowchart LR
+    T1["T1  Migration runner<br/>and 0001 baseline<br/>decide D-4"]
+    T2["T2  Decouple the core<br/>no behaviour change"]
+    T3["T3  Neutral model,<br/>CatalogSource, ImslpSource"]
+    T4["T4  Migration 0002<br/>sources<br/>decide D-5"]
+    T5["T5  Migration 0003<br/>licences, score_files"]
+    T6["T6  ScoreStorage<br/>and B2 adapter<br/>decide D-1"]
+    T7["T7  processScores, leases<br/>and licence policy<br/>decide D-6, D-7"]
+    T8["T8  OpenScore Lieder,<br/>MuseScore, one-PDF test<br/>decide D-2, D-3"]
+
+    T1 --> T4
+    T2 --> T3
+    T3 --> T4
+    T4 --> T5
+    T2 --> T6
+    T5 --> T7
+    T6 --> T7
+    T7 --> T8
+    T3 --> T8
+
+    classDef schema fill:#e7f6ec,stroke:#2f8a4c,stroke-width:2px,color:#1f2933
+    classDef refactor fill:#e8f0fe,stroke:#3b6fd8,stroke-width:2px,color:#1f2933
+    classDef feature fill:#f3ecfd,stroke:#7a4fd0,stroke-width:2px,color:#1f2933
+
+    class T1,T4,T5 schema
+    class T2,T3 refactor
+    class T6,T7,T8 feature

@@ -1,0 +1,30 @@
+%%{init: {"theme": "base", "htmlLabels": false, "sequence": {"mirrorActors": false, "showSequenceNumbers": true, "actorMargin": 45}, "themeVariables": {"fontFamily": "Arial", "fontSize": "15px", "actorBkg": "#e8f0fe", "actorBorder": "#3b6fd8", "noteBkgColor": "#fff7e6", "noteBorderColor": "#c58a1a", "labelBoxBkgColor": "#f1f3f5", "labelBoxBorderColor": "#7b8494"}}}%%
+%% FINAL v2: importing a catalogue from ANY source. The core only sees the neutral page format.
+
+sequenceDiagram
+    actor Op as Operator
+    participant Cmd as scripts/import.js
+    participant Core as core: importCatalog
+    participant Source as CatalogSource
+    participant Ext as IMSLP API or git clone
+    participant Repo as CatalogRepository
+    participant DB as PostgreSQL
+
+    Op->>Cmd: npm run import -- --source imslp --limit N
+    Cmd->>Cmd: create adapters for the chosen source (composition root)
+    Cmd->>Core: importCatalog(source, repository, options)
+    Core->>Repo: acquire importer lock, start or resume run (per source)
+
+    loop until --limit or no more results
+        Core->>Source: fetchPage(start, limit)
+        Source->>Ext: read raw records (rate limit and retries in the adapter)
+        Ext-->>Source: raw data in the source's own format
+        Note over Source: adapter validates, cleans and maps to the neutral model
+        Source-->>Core: { works, skipped, fetchedCount, moreAvailable }
+        Core->>Repo: savePage(run, pageStart, works, fetchedCount, finish)
+        Repo->>DB: ONE transaction: upsert composers and works, add pending score_files with licence evidence, advance checkpoint
+    end
+
+    Core-->>Cmd: summary (inserted, updated, unchanged, skipped, files queued)
+    Cmd-->>Op: printed summary + exit code
+    Note over Source,Ext: ImslpSource always returns files = [] (IMSLP robots.txt forbids bot file downloads)

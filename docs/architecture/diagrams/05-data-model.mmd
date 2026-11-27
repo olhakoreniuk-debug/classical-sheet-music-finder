@@ -1,0 +1,99 @@
+%%{init: {"theme": "base", "htmlLabels": false, "themeVariables": {"fontFamily": "Arial", "fontSize": "14px", "primaryColor": "#ffffff", "primaryBorderColor": "#3b6fd8", "lineColor": "#5b6577", "attributeBackgroundColorOdd": "#ffffff", "attributeBackgroundColorEven": "#f7f8fa"}}}%%
+%% FINAL v2 data model after migrations 0001-0003 (T1, T4, T5).
+%% v2 adds to score_files: lease and retry columns, licence evidence and visibility.
+%% rights_reviews is FUTURE (website stage, separate migration); it is shown so the design is complete.
+%% Existing tables keep their data; "new" marks what the migrations add. PDFs live in B2, not in PostgreSQL.
+
+erDiagram
+    sources ||--o{ works : provides
+    sources ||--o{ import_runs : "imported by"
+    composers |o--o{ works : wrote
+    import_runs |o--o{ works : "last changed"
+    works ||--o{ score_files : has
+    licences ||--o{ score_files : governs
+    score_files ||--o{ rights_reviews : "reviewed in (future)"
+
+    sources {
+        smallint id PK "new table"
+        text code UK "imslp, openscore-lieder"
+        text name
+        text homepage_url
+        text pdf_policy "none or allowed"
+    }
+    works {
+        bigint id PK
+        smallint source_id FK "new"
+        text source_work_id "new, unique per source"
+        text permlink UK "page URL; may become optional in T4 (D-5)"
+        text imslp_id "IMSLP only; optional from T4"
+        text title
+        bigint composer_id FK
+        text catalogue_number
+        bigint imslp_page_id
+        text parent
+        bigint last_import_run_id FK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    composers {
+        bigint id PK
+        text name UK
+        timestamptz created_at
+    }
+    import_runs {
+        bigint id PK
+        smallint source_id FK "new"
+        text status "running, succeeded, failed"
+        int start_offset
+        int next_offset
+        int works_fetched
+        int works_upserted
+        text error_message
+    }
+    licences {
+        text code PK "new table: CC0-1.0, PD, CC-BY-4.0, CC-BY-SA-4.0, unknown"
+        text name
+        text url
+        boolean redistributable
+        boolean requires_attribution
+    }
+    score_files {
+        bigint id PK "new table"
+        bigint work_id FK "source comes from works"
+        text origin_ref "unique with work_id"
+        text origin_format "pdf or mscx"
+        text licence_code FK "as stated by the source for THIS file"
+        text licence_source_url "where the licence is stated"
+        timestamptz licence_captured_at
+        text attribution
+        text status "pending, processing, stored, rejected, failed, withdrawn"
+        int attempts "incremented at every claim"
+        timestamptz next_attempt_at "retry not before"
+        text lease_owner "worker id while processing"
+        timestamptz lease_expires_at "reservation ends"
+        text last_error
+        char sha256 "indexed, finds duplicates"
+        bigint size_bytes
+        text storage_key "B2 key = content hash; may be shared"
+        text download_name "friendly file name for users"
+        text visibility "private (default) or public"
+        timestamptz stored_at
+    }
+    rights_reviews {
+        bigint id PK "FUTURE table, website stage"
+        bigint score_file_id FK
+        text jurisdiction "e.g. EU, US"
+        text composition_status "public domain, licensed, unclear"
+        text text_status "lyrics and translation"
+        text edition_status "edition licence verified"
+        text decision "approved or not approved"
+        text evidence "URLs and notes"
+        text reviewer
+        timestamptz reviewed_at
+    }
+    schema_migrations {
+        int version PK "new table"
+        text name
+        text checksum
+        timestamptz applied_at
+    }

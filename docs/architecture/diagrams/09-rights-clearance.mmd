@@ -1,0 +1,27 @@
+%%{init: {"theme": "base", "htmlLabels": false, "flowchart": {"htmlLabels": false, "curve": "basis", "nodeSpacing": 40, "rankSpacing": 45}, "themeVariables": {"fontFamily": "Arial", "fontSize": "15px", "lineColor": "#5b6577", "primaryTextColor": "#1f2933"}}}%%
+%% FINAL v2: how permission is checked for each individual file (edition), in two gates.
+%% Gate 1 is automatic and only allows PRIVATE storage. Gate 2 is a recorded human review, required before
+%% any file is shown to website users. Uncertain cases stay private.
+
+flowchart TD
+    src(["A source offers a file<br/>with a licence statement"]) --> cap["Import records, per file:<br/>licence code, licence source URL,<br/>date captured, attribution"]
+    cap --> g1{"Gate 1, automatic:<br/>licence redistributable, source<br/>allows downloads, evidence present?"}
+    g1 -- no --> rej["rejected<br/>not stored"]
+    g1 -- yes --> priv["Stored in the private bucket<br/>visibility = private"]
+    priv --> g2{"Gate 2, human review per file<br/>and per country: music, lyrics,<br/>translation and edition all free?"}
+    g2 -- "no or unsure" --> keep["Stays private"]
+    g2 -- yes --> rec["Review recorded: reviewer, date,<br/>countries, evidence"]
+    rec --> pub["visibility = public<br/>shown with licence and attribution"]
+    pub -- "takedown or licence change" --> wd["withdrawn, or back to private"]
+
+    classDef step fill:#ffffff,stroke:#3b6fd8,stroke-width:2px,color:#1f2933
+    classDef gate fill:#f3ecfd,stroke:#7a4fd0,stroke-width:2px,color:#1f2933
+    classDef good fill:#e7f6ec,stroke:#2f8a4c,stroke-width:2px,color:#1f2933
+    classDef bad fill:#fdecec,stroke:#c0392b,color:#1f2933
+    classDef entry fill:#e8f0fe,stroke:#3b6fd8,color:#1f2933
+
+    class src entry
+    class cap,priv,rec,keep step
+    class g1,g2 gate
+    class pub good
+    class rej,wd bad

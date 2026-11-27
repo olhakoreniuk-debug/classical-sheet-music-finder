@@ -1,0 +1,97 @@
+%%{init: {"theme": "base", "htmlLabels": false, "flowchart": {"htmlLabels": false, "curve": "basis", "nodeSpacing": 25, "rankSpacing": 55}, "themeVariables": {"fontFamily": "Arial", "fontSize": "15px", "lineColor": "#5b6577", "primaryTextColor": "#1f2933", "clusterBkg": "#f7f8fa", "clusterBorder": "#c3c9d4"}}}%%
+%% FINAL v2 proposed architecture: Ports and Adapters (Hexagonal), read top to bottom.
+%% Solid arrow = calls; dotted arrow = implemented by; dashed border = later / future.
+%% scripts/ is the composition root: it creates the adapters and passes them into the core.
+
+flowchart TB
+    subgraph DRIVING["1  Driving side"]
+        cli["scripts/  (composition root)<br/>migrate, import --source,<br/>scores:download, verify"]
+        cliHelp["src/cli/<br/>options, config, output"]
+        web["src/web/  (future)<br/>search, preview, download"]
+    end
+
+    subgraph CORE["2  src/core/  -  use cases"]
+        imp["importCatalog<br/>pages, runs, resume"]
+        proc["processScores<br/>leases, licence policy,<br/>render, verify, store"]
+        qry["searchCatalog,<br/>getDownloadLink (future,<br/>rights-cleared files only)"]
+    end
+
+    subgraph PORTS["3  Ports (src/core/ports.js)"]
+        pSrc{{"CatalogSource<br/>fetchPage, fetchFile"}}
+        pRen{{"ScoreRenderer<br/>toPdf, file to file"}}
+        pSto{{"ScoreStorage<br/>put (streamed), exists,<br/>downloadUrl"}}
+        pRep{{"CatalogRepository<br/>runs, works,<br/>file leases"}}
+        pWs{{"TempWorkspace<br/>temp files, sha256"}}
+    end
+
+    subgraph DRIVEN["4  src/adapters/"]
+        aImslp["imslp/<br/>ImslpSource<br/>metadata only"]
+        aLied["openscore/<br/>OpenScoreLieder<br/>Source"]
+        aMut["mutopia/<br/>MutopiaSource<br/>(later)"]
+        aMs["musescore/<br/>MuseScore<br/>Renderer"]
+        aB2["storage/<br/>B2Storage"]
+        aLoc["storage/<br/>Local + Memory<br/>Storage"]
+        aPg["postgres/<br/>Repository,<br/>migrations"]
+        aWs["workspace/<br/>Local<br/>Workspace"]
+    end
+
+    subgraph EXT["5  External systems"]
+        xImslp[("IMSLP API")]
+        xLied[("OpenScore Lieder<br/>pinned git clone")]
+        xMut[("Mutopia /ftp/")]
+        xMs[("MuseScore 4 CLI")]
+        xB2[("Backblaze B2<br/>private bucket")]
+        xPg[("PostgreSQL 17<br/>Docker")]
+        xFs[("Local disk<br/>temp folder")]
+    end
+
+    cli --> cliHelp
+    cli --> imp
+    cli --> proc
+    web -.-> qry
+
+    imp --> pSrc
+    imp --> pRep
+    proc --> pSrc
+    proc --> pRen
+    proc --> pSto
+    proc --> pRep
+    proc --> pWs
+    qry -.-> pRep
+    qry -.-> pSto
+
+    pSrc -.-> aImslp
+    pSrc -.-> aLied
+    pSrc -.-> aMut
+    pRen -.-> aMs
+    pSto -.-> aB2
+    pSto -.-> aLoc
+    pRep -.-> aPg
+    pWs -.-> aWs
+
+    DRIVING ~~~ CORE
+    CORE ~~~ PORTS
+    PORTS ~~~ DRIVEN
+    DRIVEN ~~~ EXT
+
+    aImslp --> xImslp
+    aLied --> xLied
+    aMut --> xMut
+    aMs --> xMs
+    aB2 --> xB2
+    aPg --> xPg
+    aWs --> xFs
+
+    classDef driving fill:#e8f0fe,stroke:#3b6fd8,color:#1f2933
+    classDef core fill:#ffffff,stroke:#3b6fd8,stroke-width:2px,color:#1f2933
+    classDef port fill:#f3ecfd,stroke:#7a4fd0,stroke-width:2px,color:#1f2933
+    classDef adapter fill:#e7f6ec,stroke:#2f8a4c,color:#1f2933
+    classDef ext fill:#f1f3f5,stroke:#7b8494,color:#1f2933
+    classDef future fill:#ffffff,stroke:#7b8494,stroke-dasharray:6 4,color:#5b6577
+
+    class cli,cliHelp driving
+    class imp,proc core
+    class pSrc,pRen,pSto,pRep,pWs port
+    class aImslp,aLied,aMs,aB2,aLoc,aPg,aWs adapter
+    class xImslp,xLied,xMs,xB2,xPg,xFs ext
+    class web,qry,aMut,xMut future

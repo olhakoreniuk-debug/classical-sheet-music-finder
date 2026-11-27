@@ -1,0 +1,299 @@
+CLASSICAL SHEET MUSIC FINDER
+Architecture overview in plain English
+Version 2, 21 November 2026 - proposed, not yet built
+
+This text explains how the project is organised and how it is planned to
+grow. It avoids technical terms where possible; where a term is needed, it
+is explained. The full technical description is in ARCHITECTURE.md, and the
+step-by-step plan is in Implementation_Roadmap.docx (same folder).
+
+
+1. WHAT THE PROJECT DOES
+------------------------
+
+The Classical Sheet Music Finder collects information about classical
+music works - titles, composers, catalogue numbers and links - from free
+online music libraries, and stores it in a database so it can be searched.
+
+Today (end of Week 1) it reads from one library, IMSLP, and has stored a
+first sample of 10 works. The next step is to read from more libraries,
+starting with OpenScore Lieder (a free collection of 19th-century songs),
+and to keep copies of sheet music PDFs that may legally be shared, in a
+private online storage space (Backblaze B2). One day there may be a public
+website where people can search, preview and download scores.
+
+
+2. THE MAIN IDEA: A CORE WITH PLUGS
+-----------------------------------
+
+Think of the application as a kitchen appliance with standard sockets.
+
+- The CORE is the appliance itself. It contains the rules: how to import a
+  catalogue page by page, how to decide whether a file may be stored, how
+  to check a PDF, what to do when something goes wrong.
+
+- The PORTS are the standard sockets. Each socket describes what the core
+  needs, for example "give me the next page of works" or "store this file".
+
+- The ADAPTERS are the plugs. Each plug connects one specific technology to
+  a socket: one plug for IMSLP, one for OpenScore Lieder, one for Backblaze
+  B2, one for the PostgreSQL database, one for MuseScore (which turns music
+  notation files into PDFs), and one for temporary files on the disk.
+
+This design is called "Ports and Adapters" (or "Hexagonal Architecture").
+Its big advantage: to add a new music library, you build one new plug. The
+core does not change. To move from Backblaze B2 to another storage
+provider, you swap one plug. The core does not change.
+
+One strict rule keeps this true: the core never reaches out to a specific
+technology itself. It only uses its sockets. An automatic test checks this
+rule every time the tests run.
+
+
+3. THE PARTS AND THEIR JOBS
+---------------------------
+
+Command-line scripts  The buttons you press: "migrate", "import",
+                      "download scores", "verify". They connect the right
+                      plugs to the core and start the work.
+
+The core              Two main jobs ("use cases"):
+                      - importCatalog: read works from a library page by
+                        page and save them, safely and without duplicates;
+                      - processScores: take files waiting to be processed,
+                        check their licence, fetch them, turn them into
+                        PDFs if needed, check them and store them.
+
+Music library plugs   IMSLP (information only, never files - IMSLP does
+                      not allow automated file downloads), OpenScore
+                      Lieder, and later Mutopia.
+
+Renderer plug         MuseScore, which converts OpenScore's notation files
+                      into PDFs.
+
+Storage plug          Backblaze B2: one private storage space shared by all
+                      libraries. Test versions store files in a local
+                      folder or in memory.
+
+Workspace plug        A private temporary folder for each file while it is
+                      being processed.
+
+Database plug         PostgreSQL: stores works, composers, import history,
+                      licences and a record of every file. The PDFs
+                      themselves are stored in B2, not in the database.
+
+
+4. HOW A CATALOGUE IS IMPORTED
+------------------------------
+
+1. You run the import command and choose a library (IMSLP by default).
+2. The core asks the library plug for the next page of works.
+3. The plug does the library-specific work (respecting IMSLP's request to
+   wait 2 seconds between requests, cleaning the data) and hands back the
+   works in one common format.
+4. The core saves the page in one go: works, composers, any files the
+   library offers (with their licence information), and a bookmark saying
+   how far the import has got. Either all of this is saved, or none of it.
+5. If the import is interrupted, it can continue from the bookmark.
+   Running the same import twice never creates duplicates.
+
+
+5. HOW PDF FILES ARE PROCESSED
+------------------------------
+
+This happens separately from importing, with its own command.
+
+1. RESERVE: the worker reserves a few waiting files. A reservation is
+   like taking a ticket with your name and an expiry time: "this file is
+   being handled by worker X until 15:45". Others leave it alone.
+2. CHECK THE LICENCE: only files whose licence clearly allows sharing, and
+   whose licence statement has been recorded, may continue. Everything else
+   is marked "rejected".
+3. FETCH: the file is copied into a private temporary folder, piece by
+   piece. If it is bigger than the size limit, the copy stops.
+4. CONVERT: if the file is not yet a PDF (OpenScore's files are not),
+   MuseScore turns it into one.
+5. INSPECT: the PDF is read once from start to finish to confirm it really
+   is a PDF, to measure it and to calculate its "fingerprint" (a SHA-256
+   hash - a short code that is different for every different file).
+6. STORE: the fingerprint becomes the file's name in B2. If a file with
+   that name is already there, nothing is uploaded again. Otherwise the PDF
+   is uploaded, piece by piece.
+7. RECORD: the database notes that the file is stored - but only if the
+   worker still holds the reservation.
+8. CLEAN UP: the temporary folder is deleted, whatever happened.
+
+
+6. WHAT HAPPENS WHEN THINGS GO WRONG
+------------------------------------
+
+Slow work. Converting a score can take minutes. The database does not keep
+anything "locked" during that time; the reservation ticket is simply
+written into the file's record, so the database stays free for others.
+Before uploading, the worker renews its ticket.
+
+A worker crashes. Its tickets simply expire. The next run sees the expired
+tickets and picks those files up again. If the crash happened just after
+the upload, the next run finds the file already stored (same fingerprint,
+same name) and only records it - nothing is uploaded twice.
+
+Two workers at once. Reserving uses a database feature (FOR UPDATE SKIP
+LOCKED) that makes sure two workers can never take the same file at the
+same moment. And every time a worker saves a result, the database checks
+that the worker still holds that file's ticket. If not, the result is
+ignored.
+
+Temporary problems (network errors, a service that is briefly down). The
+file goes back into the queue with a waiting time that doubles each time:
+1, 2, 4, 8, 16 minutes. After 5 attempts it is marked "failed" and waits
+for the owner to look at it.
+
+Permanent problems (the file is not a PDF, or it is too big). The file is
+marked "failed" straight away.
+
+
+7. WHY LARGE FILES DO NOT FILL THE MEMORY
+----------------------------------------
+
+Some scanned scores are large. Instead of loading a whole PDF into the
+computer's memory, every step works with a file on disk and moves the data
+in small pieces ("streaming"). The computer therefore needs about the same
+small amount of memory for a 100-kilobyte song as for a 100-megabyte
+symphony. There is also a size limit (proposed: 100 MB per file).
+
+Using a temporary file also makes three things simple: the fingerprint can
+be calculated before the upload; MuseScore can read and write normal files;
+and a failed upload can be tried again without fetching or converting the
+file again.
+
+
+8. COPYRIGHT AND PERMISSIONS
+----------------------------
+
+A printed score can involve several different rights, and all of them must
+be clear before a file may be shared:
+
+- the MUSIC itself (free once enough time has passed after the composer's
+  death - how long depends on the country);
+- the WORDS, for songs (the poet, and any translator, have their own
+  rights);
+- the EDITION (the people who typeset, transcribed or edited this
+  particular version may hold rights in it);
+- the LIBRARY'S RULES (for example, IMSLP does not allow automated file
+  downloads, so we never download its files).
+
+Because of this, permission is checked for every individual file, not for a
+whole library. For every file we record which licence the library states
+for that exact file, where that statement can be checked, when we recorded
+it, and how the licence says the work must be credited.
+
+There are two gates:
+
+Gate 1 - private storage (automatic). A file is stored in our private B2
+space only if its licence is known and allows sharing, the evidence is
+recorded, and the library allows downloads. Everything stored is marked
+"private".
+
+Gate 2 - public availability (a person decides). Before a public website
+may show a file, a person reviews it for the countries the website serves:
+Is the music free? Are the words and any translation free? Is the edition's
+licence confirmed on the library's page? Is the credit line correct? The
+review is recorded with the reviewer's name, the date and the evidence.
+Only then is the file marked "public". If in doubt, the file stays private.
+
+After publication, a takedown request immediately marks the file
+"withdrawn", and its download links stop working (they are only ever
+issued for a short time). If a library later changes a file's licence, the
+file goes back to private until it is reviewed again.
+
+OpenScore Lieder gives its transcriptions away under CC0 ("no rights
+reserved"). That covers OpenScore's own work, but not automatically the
+song itself or its poem, so each song still goes through Gate 2 before it
+could ever be made public.
+
+This system records and enforces decisions; it is not legal advice. Before
+a public website launches, the rules for the chosen countries should be
+confirmed with a qualified adviser.
+
+
+9. KEEPING DATA AND SECRETS SAFE
+--------------------------------
+
+- The database structure changes only through numbered "migration" files,
+  applied in order and recorded, with a backup taken first.
+- The existing 10 works are counted and fingerprinted before and after
+  every database change to prove nothing was lost.
+- Tests never touch the real data; they use temporary copies.
+- Passwords and keys live only in the local .env file, which is never
+  uploaded to GitHub. The B2 key can reach only our one bucket.
+- The storage space is private. Nothing is public unless it passes Gate 2.
+
+
+10. HOW THE PROJECT CAN GROW
+----------------------------
+
+New music library       Write one new plug, add one row to the "sources"
+                        table, run the shared tests for plugs. Nothing else
+                        changes.
+New storage provider    Write one new storage plug. Stored file names are
+                        our own fingerprints, so files can simply be copied
+                        across.
+Public website          Becomes another "button" in front of the same core.
+                        It reads the database with read-only access, hands
+                        out short-lived download links, and shows only
+                        files that passed Gate 2.
+Search, voice types     New core use cases with their own database changes;
+                        they reuse the existing plugs.
+
+
+11. WHAT WE DELIBERATELY KEEP SIMPLE
+------------------------------------
+
+- Plain JavaScript, one program, one database, the only library added so
+  far being the database driver.
+- No extra frameworks for plugging parts together, no message queue (the
+  database table of files is the queue), no separate services.
+- One worker at a time to start with; the reservation system already allows
+  more later.
+- No automatic publishing: a person always decides what becomes public.
+
+
+12. THE PLAN IN EIGHT STAGES
+----------------------------
+
+T1  Set up numbered database migrations; record today's database as
+    version 1 without changing it.
+T2  Reorganise the code into core, plugs and command line, with no change
+    in behaviour, and add the automatic rule check.
+T3  Introduce the common format for works and turn IMSLP into the first
+    library plug.
+T4  Database change: record which library each work comes from.
+T5  Database change: licences, and a record for every file with its
+    licence evidence, reservation ticket, retry count and visibility.
+T6  The storage socket and the Backblaze B2 plug (with test versions).
+T7  The PDF processing job: reservations, retries, crash recovery,
+    temporary files and the licence check.
+T8  OpenScore Lieder and MuseScore: store the first real PDF in B2 and
+    check the whole journey from start to finish.
+
+Each stage is done in its own session, saved in Git before it starts, and
+approved by the owner before the next one begins. The public review step
+(Gate 2) and the website come after stage T8.
+
+
+13. DECISIONS STILL OPEN
+------------------------
+
+D-1  How to talk to Backblaze B2: its own interface (recommended, no extra
+     library) or the Amazon S3-compatible library.
+D-2  Install MuseScore 4 on the laptop (recommended).
+D-3  Where to keep the OpenScore Lieder copy (recommended: a folder next to
+     the project, not inside it).
+D-4  Stop creating tables automatically when a new database starts, and use
+     migrations instead (recommended).
+D-5  Allow works without a web page link (recommended).
+D-6  Reservation length and number of attempts (recommended: 15 minutes,
+     5 attempts).
+D-7  Maximum file size (recommended: 100 MB).
+D-8  Which countries a file must be free in before it may be shown publicly
+     (to be decided before the website stage).

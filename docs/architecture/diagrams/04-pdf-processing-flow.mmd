@@ -1,0 +1,40 @@
+%%{init: {"theme": "base", "htmlLabels": false, "sequence": {"mirrorActors": false, "showSequenceNumbers": true, "actorMargin": 35}, "themeVariables": {"fontFamily": "Arial", "fontSize": "15px", "actorBkg": "#e8f0fe", "actorBorder": "#3b6fd8", "noteBkgColor": "#fff7e6", "noteBorderColor": "#c58a1a", "labelBoxBkgColor": "#f1f3f5", "labelBoxBorderColor": "#7b8494"}}}%%
+%% FINAL v2: processScores, identical for every source. Talks only to ports.
+%% Reservation = a time-limited LEASE written in a short transaction (not a row lock held during the work).
+%% Files move through a temporary workspace on disk and are streamed, so memory use does not grow with file size.
+
+sequenceDiagram
+    actor Op as Operator
+    participant Core as core: processScores
+    participant Repo as CatalogRepository
+    participant WS as TempWorkspace
+    participant Source as CatalogSource
+    participant Rend as ScoreRenderer
+    participant Store as ScoreStorage
+
+    Op->>Core: npm run scores:download -- --limit N
+    Core->>Repo: claimFiles(workerId, N, lease 15 min)
+    Note over Repo: one short transaction: SKIP LOCKED picks free rows, sets status = processing, lease_owner, lease_expires_at, attempts + 1, then COMMIT
+    Repo-->>Core: claimed files with licence, evidence and source policy
+
+    loop each claimed file
+        Core->>Core: licencePolicy (default deny)
+        alt not allowed
+            Core->>Repo: finish(file, rejected, reason) only while the lease is ours
+        else allowed
+            Core->>WS: create a private temp folder for this file
+            Core->>Source: fetchFile(ref, tempPath, maxBytes) streamed to disk
+            opt format is not PDF (e.g. .mscx)
+                Core->>Rend: toPdf(inputPath, outputPath, timeout)
+            end
+            Core->>WS: inspect(pdfPath): %PDF- header, size, sha256 (streamed)
+            Core->>Repo: renewLease(file, workerId)
+            Core->>Store: exists(key)
+            opt not stored yet
+                Core->>Store: put(key, stream from file, size, sha256)
+            end
+            Core->>Repo: finish(file, stored, sha256, size, key) only while the lease is ours
+            Core->>WS: delete the temp folder
+        end
+    end
+    Note over Core,Store: Temporary error: back to pending with next_attempt_at (failed after max attempts). Crash: the lease expires and the file is claimed again, exists(key) prevents a second upload.

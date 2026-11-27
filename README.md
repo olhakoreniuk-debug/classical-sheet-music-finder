@@ -31,6 +31,8 @@ fetches, cleans and safely stores the data.
 - [Data source](#data-source)
 
 A step-by-step live demonstration script is in [docs/DEMO.md](docs/DEMO.md).
+The proposed next architecture (v2, not yet implemented) and its T1–T8
+implementation roadmap are in [docs/architecture/](docs/architecture/ARCHITECTURE.md).
 
 ## Why IMSLP
 

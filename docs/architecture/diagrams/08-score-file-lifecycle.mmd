@@ -1,0 +1,25 @@
+%%{init: {"theme": "base", "htmlLabels": false, "state": {"htmlLabels": false}, "flowchart": {"htmlLabels": false}, "themeVariables": {"fontFamily": "Arial", "fontSize": "15px", "primaryColor": "#e8f0fe", "primaryBorderColor": "#3b6fd8", "lineColor": "#5b6577", "primaryTextColor": "#1f2933"}}}%%
+%% FINAL v2: life of one score_files row. "processing" is protected by a time-limited lease.
+%% visibility is separate from status: every stored file is private until a recorded rights review (future website stage).
+
+stateDiagram-v2
+    direction TB
+    [*] --> pending: import records the file
+    pending --> processing: claimFiles sets a lease
+    processing --> stored: verified and uploaded
+    processing --> rejected: licence policy says no
+    processing --> pending: temporary error, retry after backoff
+    processing --> failed: permanent error or max attempts
+    failed --> pending: owner resets it
+    stored --> withdrawn: takedown or rights problem
+    stored --> [*]
+    rejected --> [*]
+    withdrawn --> [*]
+    note left of processing
+        Protected by a lease. If the worker crashes,
+        the lease expires and the next run claims it again.
+    end note
+    note right of stored
+        visibility = private by default.
+        public only after a rights review.
+    end note
