@@ -1,0 +1,202 @@
+.shell {
+  position: relative;
+  isolation: isolate;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow-x: clip;
+}
+
+.skipLink {
+  position: absolute;
+  left: var(--space-3);
+  top: -100px;
+  z-index: 20;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.skipLink:focus {
+  top: var(--space-3);
+}
+
+/* Sticky on wide screens only; on phones it would cover too much of the page. */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgb(255 255 255 / 0.72);
+  backdrop-filter: saturate(160%) blur(12px);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.headerInner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: var(--content-width);
+  min-height: 3.75rem;
+  margin: 0 auto;
+  padding: var(--space-2) var(--space-4);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  color: var(--color-ink);
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--color-ink);
+}
+
+.brandMark {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  background: linear-gradient(135deg, #e4ebff, #f3eeff);
+  border-radius: var(--radius);
+  box-shadow: inset 0 0 0 1px var(--color-decor-soft);
+}
+
+.brandMark path {
+  fill: none;
+  stroke: var(--color-primary);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.brandText {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+
+.brandName {
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.brandSub {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+.search {
+  flex: 1;
+  min-width: 0;
+  max-width: 38rem;
+  margin: 0 auto;
+}
+
+.nav {
+  flex-shrink: 0;
+}
+
+.navList {
+  display: flex;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.navLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
+  padding: 0 var(--space-3);
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--color-text);
+  text-decoration: none;
+  white-space: nowrap;
+  border-radius: var(--radius);
+}
+
+.navLink:hover {
+  color: var(--color-ink);
+  background: var(--color-surface-muted);
+}
+
+.navLinkActive,
+.navLinkActive:hover {
+  color: var(--color-primary);
+  background: var(--color-accent-soft);
+}
+
+.main {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4) var(--space-6);
+}
+
+.main:focus {
+  outline: none;
+}
+
+@media (max-width: 56rem) {
+  .header {
+    position: static;
+  }
+
+  .headerInner {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+    padding-bottom: var(--space-3);
+  }
+
+  .nav {
+    margin-left: auto;
+  }
+
+  .search {
+    order: 3;
+    flex-basis: 100%;
+    max-width: none;
+  }
+
+  .main {
+    padding-top: var(--space-4);
+  }
+}
+
+@media (max-width: 30rem) {
+  /* Keep the header to two rows on phones: the mark stays visible, the name stays readable by screen readers. */
+  .brandText {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
+  .navLink {
+    padding: 0 var(--space-2);
+    font-size: 0.9rem;
+  }
+
+  /* "Add a work" becomes "Add" visually; screen readers still hear the full label. */
+  .navLong {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+}

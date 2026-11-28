@@ -1,0 +1,70 @@
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.step,
+.number {
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  padding: 0 var(--space-3);
+  font: inherit;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.step:hover:not(:disabled),
+.number:hover:not(:disabled) {
+  border-color: var(--color-primary);
+}
+
+.step:disabled,
+.number:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.numbers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.number {
+  padding: 0 var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.current {
+  color: var(--color-primary-text);
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  cursor: default;
+}
+
+.gap {
+  padding: 0 var(--space-1);
+  color: var(--color-text-muted);
+}
+
+.position {
+  flex-basis: 100%;
+  order: 10;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}

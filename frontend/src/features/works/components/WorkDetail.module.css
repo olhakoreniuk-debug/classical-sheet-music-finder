@@ -1,0 +1,200 @@
+.work {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.header {
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  text-align: center;
+  background: linear-gradient(180deg, var(--color-info-bg), var(--color-surface) 70%);
+}
+
+.eyebrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-3);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+
+.eyebrow > span:last-child {
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.title {
+  max-width: 40ch;
+  margin: 0 auto var(--space-2);
+  font-size: clamp(1.75rem, 4vw, 2.6rem);
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.composer {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--color-text-muted);
+}
+
+.composerLink {
+  color: inherit;
+  text-decoration-color: var(--color-decor-soft);
+}
+
+.composerLink:hover {
+  color: var(--color-accent);
+}
+
+.rule {
+  width: 6rem;
+  height: 2px;
+  margin: var(--space-3) auto 0;
+  background: var(--color-decor);
+}
+
+.body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem);
+  border-top: 1px solid var(--color-border);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5);
+  min-width: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--space-4) var(--space-5);
+  margin: 0;
+}
+
+.facts dt,
+.record dt {
+  margin-bottom: var(--space-1);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.facts dd,
+.record dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.catalogue {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.missing {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-style: italic;
+  color: var(--color-text-muted);
+}
+
+.external {
+  font-weight: 600;
+}
+
+.code {
+  font-size: 0.875rem;
+  padding: 0.1rem 0.3rem;
+  background: var(--color-surface-muted);
+  border-radius: 4px;
+}
+
+.planned {
+  padding: var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius);
+  background: var(--color-planned-bg);
+}
+
+.planned p {
+  margin: var(--space-2) 0 0;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.plannedHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.plannedHeader .sectionTitle {
+  font-size: 1rem;
+}
+
+.badge {
+  padding: 0 var(--space-2);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-planned);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  background: var(--color-surface-muted);
+  border-left: 1px solid var(--color-border);
+  min-width: 0;
+}
+
+.record {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+@media (max-width: 48rem) {
+  .header {
+    padding: var(--space-5) var(--space-4) var(--space-4);
+  }
+
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .main,
+  .side {
+    padding: var(--space-4);
+  }
+
+  .side {
+    border-left: 0;
+    border-top: 1px solid var(--color-border);
+  }
+}
