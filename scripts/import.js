@@ -6,19 +6,15 @@
 //
 // Exit codes: 0 succeeded, 1 import failed, 2 usage error / another import running.
 
-import { createPool } from '../src/db.js';
-import { createImslpClient } from '../src/imslpClient.js';
-import { parseWorksPage } from '../src/parser.js';
-import * as repo from '../src/repository.js';
-import {
-  DEFAULT_CRAWL_DELAY_MS,
-  USAGE,
-  UsageError,
-  formatSummary,
-  parseImportOptions,
-  readClientOptions,
-  runImport,
-} from '../src/importer.js';
+// Composition root: the only place that wires adapters to the core.
+import { createImslpClient } from '../src/adapters/imslp/imslpClient.js';
+import { createImslpSource } from '../src/adapters/imslp/imslpSource.js';
+import { createPool } from '../src/adapters/postgres/db.js';
+import { createPostgresRepository } from '../src/adapters/postgres/repository.js';
+import { formatSummary } from '../src/cli/formatSummary.js';
+import { DEFAULT_CRAWL_DELAY_MS, USAGE, parseImportOptions, readClientOptions } from '../src/cli/importOptions.js';
+import { UsageError } from '../src/core/errors.js';
+import { runImport } from '../src/core/importCatalog.js';
 
 async function main() {
   let options;
@@ -40,6 +36,7 @@ async function main() {
 
   const client = createImslpClient(clientOptions);
   const pool = createPool();
+  const repo = createPostgresRepository(pool);
 
   // First Ctrl+C: finish the current page, then stop (the run stays resumable).
   // Second Ctrl+C: exit immediately (safe: an uncommitted page is rolled back).
@@ -57,7 +54,7 @@ async function main() {
 
   let lock = null;
   try {
-    lock = await repo.acquireImporterLock(pool);
+    lock = await repo.acquireImporterLock();
     if (!lock) {
       console.error('Another import is already running (importer lock is held). Nothing was changed.');
       return 2;
@@ -65,9 +62,7 @@ async function main() {
 
     console.log(`Importing up to ${options.limit} records, page size ${Math.min(options.pageSize, options.limit)}.`);
     const summary = await runImport({
-      pool,
-      client,
-      parsePage: parseWorksPage,
+      source: createImslpSource({ client }),
       repo,
       options,
       signal: controller.signal,

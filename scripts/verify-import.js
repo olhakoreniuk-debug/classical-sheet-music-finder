@@ -4,7 +4,7 @@
 // Usage: mise exec -- npm run verify:import
 
 import { readFile } from 'node:fs/promises';
-import { createPool } from '../src/db.js';
+import { createPool } from '../src/adapters/postgres/db.js';
 
 // Splits the file into checks at "-- check: <title>" lines.
 function splitChecks(sqlText) {

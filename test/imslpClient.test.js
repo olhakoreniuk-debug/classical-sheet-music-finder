@@ -8,7 +8,7 @@ import {
   validateWorksResponse,
   createImslpClient,
   ImslpApiError,
-} from '../src/imslpClient.js';
+} from '../src/adapters/imslp/imslpClient.js';
 
 // ---------- helpers ----------
 

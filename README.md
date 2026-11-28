@@ -91,23 +91,28 @@ All of these were seen in real API responses while building the importer:
 
 ## Architecture
 
+Ports and Adapters (see [docs/architecture](docs/architecture/ARCHITECTURE.md)): `src/core/` holds the
+import use case, its ports and errors and imports nothing outside itself; `src/adapters/` hold the
+IMSLP and PostgreSQL code; `src/cli/` parses options and formats output; `scripts/` wire them
+together. `test/architecture.test.js` enforces these boundaries.
+
 ```
   IMSLP API (HTTPS, JSON)
           |
           v
-  src/imslpClient.js   fetch one page: timeout, retries, crawl delay, error detection
+  src/adapters/imslp/imslpClient.js   fetch one page: timeout, retries, crawl delay, error detection
           |
           v
-  src/parser.js        validate and clean records (pure functions, no I/O)
+  src/adapters/imslp/parser.js        validate and clean records (pure functions, no I/O)
           |
           v
-  src/importer.js      the loop: choose/resume a run, fetch -> parse -> save, summary
+  src/core/importCatalog.js      the loop: choose/resume a run, fetch -> parse -> save, summary
           |
           v
-  src/repository.js    SQL: upsert composers and works + save progress, one transaction per page
+  src/adapters/postgres/repository.js    SQL: upsert composers and works + save progress, one transaction per page
           |
           v
-  src/db.js            connection pool and transaction helper (reads credentials from .env)
+  src/adapters/postgres/db.js            connection pool and transaction helper (reads credentials from .env)
           |
           v
   PostgreSQL 17 (Docker)
@@ -118,7 +123,7 @@ All of these were seen in real API responses while building the importer:
 | `scripts/import.js` | Command-line entry point for the importer (`npm run import`) |
 | `scripts/verify-import.js` + `scripts/verify-import.sql` | Read-only checks after an import (`npm run verify:import`) |
 | `scripts/fetch-sample.js` | Fetches 10 works and prints them; writes nothing (`npm run fetch:sample`) |
-| `db/schema.sql` | Database tables (loaded automatically by Docker on first start) |
+| `db/migrations/` + `src/adapters/postgres/migrations.js` + `scripts/migrate.js` | Versioned schema migrations (`npm run migrate`, ADR-0006) |
 | `docker-compose.yml` | The PostgreSQL container |
 | `test/*.test.js` | Offline tests (no network, no database) |
 | `test/db/*.test.js` | Integration tests against the real PostgreSQL container |
@@ -227,12 +232,22 @@ never print its value.
 ## Starting and stopping PostgreSQL
 
 ```powershell
-docker compose up -d     # start (creates the database and tables on the very first start)
+docker compose up -d     # start (creates an empty database on the very first start)
 docker compose ps        # wait until STATUS shows "(healthy)"
 ```
 
-On the first start, Docker runs `db/schema.sql`, which creates the tables
-`composers`, `works` and `import_runs`. It does **not** run again on later starts.
+Then create or update the tables with the migration runner (safe to run any
+time; it only applies migrations that have not run yet):
+
+```powershell
+mise exec -- npm run migrate
+```
+
+On a new database this creates `composers`, `works` and `import_runs` from
+`db/migrations/0001_baseline.sql`. A database created before migrations existed
+is *baselined*: its tables are checked and `0001` is recorded as applied without
+running it, so no data is touched. Applied migrations are listed in the table
+`schema_migrations`.
 
 Open an interactive SQL prompt (`psql`) inside the container. The single quotes
 matter: the user and database names are read from the container's own
@@ -403,7 +418,7 @@ WHERE w.title ILIKE '%waltz%';
 
 ### Parser decisions: missing fields, dates and time zones
 
-The parser (`src/parser.js`) checks every record on its own:
+The parser (`src/adapters/imslp/parser.js`) checks every record on its own:
 
 - **Required fields missing or invalid → the record is skipped with a reason.**
   Required are `permlink` (must be an `http(s)` URL on `imslp.org`), `id`, the
@@ -484,8 +499,9 @@ mise exec -- npm run import -- --resume
 - The volume survives `docker compose stop`, `docker compose down`, restarting
   Docker Desktop and rebooting. Only `docker compose down -v` (or deleting the
   volume in Docker Desktop) removes it.
-- `db/schema.sql` runs only when the volume is empty. Editing it later does not
-  change an existing database (there is no migration tool yet).
+- Schema changes are made only with new files in `db/migrations/` and
+  `npm run migrate`. Never edit an applied migration: the runner checks
+  checksums and stops if one changed.
 
 ## Limitations and future work
 

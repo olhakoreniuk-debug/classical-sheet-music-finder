@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readDbConfig, withTransaction } from '../src/db.js';
+import { readDbConfig, withTransaction } from '../src/adapters/postgres/db.js';
 import {
   savePage,
   startImportRun,
@@ -13,7 +13,8 @@ import {
   findResumableRun,
   ImportRunStateError,
   OffsetMismatchError,
-} from '../src/repository.js';
+} from '../src/adapters/postgres/repository.js';
+import { toNeutralWork } from '../src/adapters/imslp/imslpSource.js';
 
 // ---------- fakes ----------
 
@@ -56,7 +57,7 @@ const validEnv = {
 };
 
 function work(permlink, overrides = {}) {
-  return {
+  return toNeutralWork({
     permlink,
     imslpId: `id ${permlink}`,
     title: 'Title',
@@ -65,7 +66,7 @@ function work(permlink, overrides = {}) {
     imslpPageId: null,
     parent: null,
     ...overrides,
-  };
+  });
 }
 
 // ---------- readDbConfig ----------
@@ -166,8 +167,8 @@ for (const [name, override, ErrorType] of [
   ['missing fetchedCount', { fetchedCount: undefined }, RangeError],
   ['fetchedCount below works.length', { fetchedCount: 0 }, RangeError],
   ['works not an array', { works: null }, TypeError],
-  ['work without permlink', { works: [{ title: 'x' }] }, TypeError],
-  ['duplicate permlinks', { works: [work('https://imslp.org/wiki/A'), work('https://imslp.org/wiki/A')], fetchedCount: 2 }, TypeError],
+  ['work without sourceWorkId', { works: [{ title: 'x' }] }, TypeError],
+  ['duplicate sourceWorkIds', { works: [work('https://imslp.org/wiki/A'), work('https://imslp.org/wiki/A')], fetchedCount: 2 }, TypeError],
 ]) {
   test(`savePage rejects ${name} before connecting`, async () => {
     const pool = fakePool();
@@ -243,7 +244,7 @@ test('savePage rolls back its writes if the progress update matches no row', asy
 
 test('run functions validate their arguments', async () => {
   const db = { query: async () => assert.fail('must not query') };
-  await assert.rejects(startImportRun(db, { startOffset: -1 }), RangeError);
+  await assert.rejects(startImportRun(db, { sourceCode: 'imslp', startOffset: -1 }), RangeError);
   await assert.rejects(resumeImportRun(db, 0), TypeError);
   await assert.rejects(finishImportRun(db, 1, { status: 'running' }), TypeError);
   await assert.rejects(finishImportRun(db, 'x', { status: 'failed' }), TypeError);
@@ -251,5 +252,5 @@ test('run functions validate their arguments', async () => {
 
 test('findResumableRun ignores a latest run that succeeded', async () => {
   const db = { query: async () => ({ rows: [{ id: '3', status: 'succeeded', start_offset: 0, next_offset: 9 }] }) };
-  assert.equal(await findResumableRun(db), null);
+  assert.equal(await findResumableRun(db, 'imslp'), null);
 });

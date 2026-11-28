@@ -1,8 +1,8 @@
 // PostgreSQL repository: saves parsed works and composers and tracks import runs.
 //
-// Input is the parser's work objects:
-//   { permlink, imslpId, title, composerName, catalogueNumber, imslpPageId, parent }
-// This module does not import the API client or the parser.
+// Input is the core's neutral work model (src/core/ports.js):
+//   { sourceWorkId, title, composerName, catalogueNumber, pageUrl, extra: { imslpId, imslpPageId, parent } }
+// This module does not import any source adapter.
 //
 // Consistency model
 // -----------------
@@ -35,33 +35,18 @@
 //                           the importer continues from its next_offset.
 //   acquireImporterLock()-> at most one importer process at a time
 
+import { ImportRunStateError, OffsetMismatchError } from '../../core/errors.js';
+import { pageUrlKey } from '../../core/catalog/pageUrl.js';
 import { withTransaction } from './db.js';
+
+// Re-exported so existing callers of this adapter keep working; the core owns them.
+export { ImportRunStateError, OffsetMismatchError };
 
 const FINISHED_STATUSES = new Set(['succeeded', 'failed']);
 
 // Advisory lock key for the importer (any fixed 64-bit number; must only be
 // unique among advisory locks used in this database).
 export const IMPORTER_LOCK_KEY = 7_312_026_005;
-
-export class ImportRunStateError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'ImportRunStateError';
-  }
-}
-
-// The page does not start at the run's stored next_offset: another process
-// already saved it, or the caller lost track of the offset.
-export class OffsetMismatchError extends Error {
-  constructor(runId, expectedOffset, actualOffset) {
-    super(`import run ${runId} expects the next page at offset ${actualOffset}, `
-      + `but a page starting at ${expectedOffset} was given`);
-    this.name = 'OffsetMismatchError';
-    this.runId = runId;
-    this.pageStart = expectedOffset;
-    this.storedNextOffset = actualOffset;
-  }
-}
 
 // ---------- validation ----------
 
@@ -87,14 +72,14 @@ function assertWorks(works, fetchedCount) {
     if (work === null || typeof work !== 'object') {
       throw new TypeError(`works[${index}] is not an object`);
     }
-    if (typeof work.permlink !== 'string' || work.permlink === '') {
-      throw new TypeError(`works[${index}].permlink must be a non-empty string`);
+    if (typeof work.sourceWorkId !== 'string' || work.sourceWorkId.trim() === '') {
+      throw new TypeError(`works[${index}].sourceWorkId must be a non-empty string`);
     }
     // A multi-row INSERT ... ON CONFLICT DO UPDATE cannot touch one key twice.
-    if (seen.has(work.permlink)) {
-      throw new TypeError(`duplicate permlink in page: ${work.permlink}`);
+    if (seen.has(work.sourceWorkId)) {
+      throw new TypeError(`duplicate sourceWorkId in page: ${work.sourceWorkId}`);
     }
-    seen.add(work.permlink);
+    seen.add(work.sourceWorkId);
   });
 }
 
@@ -119,24 +104,36 @@ const RUN_COLUMNS = `id, status, start_offset, next_offset, works_fetched,
 
 // ---------- import runs ----------
 
-// Creates a new run in status 'running', starting at startOffset.
-export async function startImportRun(db, { startOffset = 0 } = {}) {
+function assertSourceCode(sourceCode) {
+  if (typeof sourceCode !== 'string' || sourceCode === '') {
+    throw new TypeError(`sourceCode must be a non-empty string, got ${sourceCode}`);
+  }
+}
+
+// Creates a new run for a source in status 'running', starting at startOffset.
+export async function startImportRun(db, { sourceCode, startOffset = 0 } = {}) {
+  assertSourceCode(sourceCode);
   assertOffset(startOffset, 'startOffset');
   const { rows } = await db.query(
-    `INSERT INTO import_runs (start_offset, next_offset)
-     VALUES ($1, $1)
+    `INSERT INTO import_runs (source_id, start_offset, next_offset)
+     SELECT id, $1, $1 FROM sources WHERE code = $2
      RETURNING ${RUN_COLUMNS}`,
-    [startOffset],
+    [startOffset, sourceCode],
   );
+  if (rows.length === 0) throw new TypeError(`unknown source: ${sourceCode}`);
   return toRun(rows[0]);
 }
 
 // Returns the most recent run if it still needs work ('running' after a crash,
 // or 'failed'), otherwise null. Only the latest run counts: if it succeeded,
 // older failed runs are history, not something to resume.
-export async function findResumableRun(db) {
+export async function findResumableRun(db, sourceCode) {
+  assertSourceCode(sourceCode);
   const { rows } = await db.query(
-    `SELECT ${RUN_COLUMNS} FROM import_runs ORDER BY id DESC LIMIT 1`,
+    `SELECT ${RUN_COLUMNS} FROM import_runs
+     WHERE source_id = (SELECT id FROM sources WHERE code = $1)
+     ORDER BY id DESC LIMIT 1`,
+    [sourceCode],
   );
   if (rows.length === 0 || rows[0].status === 'succeeded') return null;
   return toRun(rows[0]);
@@ -219,7 +216,7 @@ export async function acquireImporterLock(pool, { key = IMPORTER_LOCK_KEY } = {}
 // ---------- pages ----------
 
 const LOCK_RUN_SQL = `
-  SELECT status, COALESCE(next_offset, start_offset) AS next_offset
+  SELECT status, COALESCE(next_offset, start_offset) AS next_offset, source_id
   FROM import_runs WHERE id = $1 FOR UPDATE`;
 
 const UPSERT_COMPOSERS_SQL = `
@@ -232,18 +229,22 @@ const UPSERT_COMPOSERS_SQL = `
 // RETURNING (xmax = 0): a freshly inserted row has xmax 0; a row updated via
 // ON CONFLICT DO UPDATE has a non-zero xmax. Rows skipped by the WHERE clause
 // are not returned at all.
+// Identity is (source_id, source_work_id) with the RUN's source (ADR-0002 section 3):
+// an importer can only ever insert or update rows of its own source.
 const UPSERT_WORKS_SQL = `
   INSERT INTO works AS w
-    (permlink, imslp_id, title, composer_id, catalogue_number,
-     imslp_page_id, parent, last_import_run_id)
-  SELECT u.permlink, u.imslp_id, u.title, c.id, u.catalogue_number,
-         u.imslp_page_id, u.parent, $8::bigint
-  FROM unnest($1::text[], $2::text[], $3::text[], $4::text[],
-              $5::text[], $6::bigint[], $7::text[])
-       AS u(permlink, imslp_id, title, composer_name, catalogue_number,
-            imslp_page_id, parent)
+    (source_id, source_work_id, permlink, page_url_key, imslp_id, title,
+     composer_id, catalogue_number, imslp_page_id, parent, last_import_run_id)
+  SELECT $10::bigint, u.source_work_id, u.page_url, u.page_url_key, u.imslp_id, u.title,
+         c.id, u.catalogue_number, u.imslp_page_id, u.parent, $9::bigint
+  FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
+              $6::text[], $7::bigint[], $8::text[], $11::text[])
+       AS u(source_work_id, page_url, imslp_id, title, composer_name,
+            catalogue_number, imslp_page_id, parent, page_url_key)
   LEFT JOIN composers c ON c.name = u.composer_name
-  ON CONFLICT (permlink) DO UPDATE SET
+  ON CONFLICT (source_id, source_work_id) DO UPDATE SET
+    permlink           = EXCLUDED.permlink,
+    page_url_key       = EXCLUDED.page_url_key,
     imslp_id           = EXCLUDED.imslp_id,
     title              = EXCLUDED.title,
     composer_id        = EXCLUDED.composer_id,
@@ -252,10 +253,10 @@ const UPSERT_WORKS_SQL = `
     parent             = EXCLUDED.parent,
     last_import_run_id = EXCLUDED.last_import_run_id,
     updated_at         = now()
-  WHERE (w.imslp_id, w.title, w.composer_id, w.catalogue_number,
+  WHERE (w.permlink, w.imslp_id, w.title, w.composer_id, w.catalogue_number,
          w.imslp_page_id, w.parent)
         IS DISTINCT FROM
-        (EXCLUDED.imslp_id, EXCLUDED.title, EXCLUDED.composer_id,
+        (EXCLUDED.permlink, EXCLUDED.imslp_id, EXCLUDED.title, EXCLUDED.composer_id,
          EXCLUDED.catalogue_number, EXCLUDED.imslp_page_id, EXCLUDED.parent)
   RETURNING (xmax = 0) AS inserted`;
 
@@ -317,14 +318,17 @@ export async function savePage(pool, { runId, pageStart, works, fetchedCount, fi
     let updated = 0;
     if (works.length > 0) {
       const { rows } = await client.query(UPSERT_WORKS_SQL, [
-        works.map((work) => work.permlink),
-        works.map((work) => work.imslpId),
+        works.map((work) => work.sourceWorkId),
+        works.map((work) => work.pageUrl ?? null),
+        works.map((work) => work.extra?.imslpId ?? null),
         works.map((work) => work.title),
         works.map((work) => work.composerName ?? null),
         works.map((work) => work.catalogueNumber ?? null),
-        works.map((work) => work.imslpPageId ?? null),
-        works.map((work) => work.parent ?? null),
+        works.map((work) => work.extra?.imslpPageId ?? null),
+        works.map((work) => work.extra?.parent ?? null),
         runId,
+        lock.rows[0].source_id,
+        works.map((work) => pageUrlKey(work.pageUrl)),
       ]);
       for (const row of rows) {
         if (row.inserted) inserted += 1;
@@ -350,4 +354,21 @@ export async function savePage(pool, { runId, pageStart, works, fetchedCount, fi
       finished: finish,
     };
   });
+}
+
+/**
+ * The CatalogRepository port (src/core/ports.js) backed by this module.
+ * The pool is bound here, so the core never sees a database connection (C4).
+ * @param {import('pg').Pool} pool
+ * @returns {import('../../core/ports.js').CatalogRepository}
+ */
+export function createPostgresRepository(pool) {
+  return {
+    acquireImporterLock: (options) => acquireImporterLock(pool, options),
+    findResumableRun: (sourceCode) => findResumableRun(pool, sourceCode),
+    startImportRun: (options) => startImportRun(pool, options),
+    resumeImportRun: (runId) => resumeImportRun(pool, runId),
+    finishImportRun: (runId, result) => finishImportRun(pool, runId, result),
+    savePage: (page) => savePage(pool, page),
+  };
 }

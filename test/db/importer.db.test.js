@@ -7,16 +7,20 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomInt } from 'node:crypto';
 import { createTestSchema } from './testSchema.js';
-import { runImport, UsageError } from '../../src/importer.js';
-import { parseWorksPage } from '../../src/parser.js';
-import * as repo from '../../src/repository.js';
+import { runImport } from '../../src/core/importCatalog.js';
+import { UsageError } from '../../src/core/errors.js';
+import { parseWorksPage } from '../../src/adapters/imslp/parser.js';
+import { createImslpSource } from '../../src/adapters/imslp/imslpSource.js';
+import { createPostgresRepository } from '../../src/adapters/postgres/repository.js';
 
 let db;
 let pool;
+let repo; // the CatalogRepository port, as the composition root creates it
 
 before(async () => {
   db = await createTestSchema();
   pool = db.pool;
+  repo = createPostgresRepository(pool);
 });
 
 after(async () => {
@@ -59,9 +63,7 @@ function fakeClient(total, { failOnRequest } = {}) {
 
 function importOnce(client, options = {}) {
   return runImport({
-    pool,
-    client,
-    parsePage: parseWorksPage,
+    source: createImslpSource({ client, parsePage: parseWorksPage }),
     repo,
     options: { limit: 10, pageSize: 1000, start: 0, resume: false, fresh: false, ...options },
     log: () => {},
@@ -160,12 +162,12 @@ test('crash after the final page commit: --resume finds nothing and fetches noth
     ...repo,
     async savePage(...args) {
       const result = await repo.savePage(...args);
-      if (args[1].finish) throw new Error('process killed');
+      if (args[0].finish) throw new Error('process killed');
       return result;
     },
   };
   await runImport({
-    pool, client: fakeClient(100), parsePage: parseWorksPage, repo: crashingRepo,
+    source: createImslpSource({ client: fakeClient(100), parsePage: parseWorksPage }), repo: crashingRepo,
     options: { limit: 10, pageSize: 1000, start: 0, resume: false, fresh: false }, log: () => {},
   });
 
@@ -181,16 +183,16 @@ test('crash after the final page commit: --resume finds nothing and fetches noth
 test('crash mid-page (before commit) leaves no partial data; resume refetches that page', async () => {
   const crashingRepo = {
     ...repo,
-    async savePage(poolArg, args) {
+    async savePage(args) {
       if (args.pageStart === 10) {
         // a bad row makes the transaction fail after the composer insert
-        return repo.savePage(poolArg, { ...args, works: [...args.works, { ...args.works[0], permlink: 'x', title: null }] });
+        return repo.savePage({ ...args, works: [...args.works, { ...args.works[0], permlink: 'x', title: null }] });
       }
-      return repo.savePage(poolArg, args);
+      return repo.savePage(args);
     },
   };
   const summary = await runImport({
-    pool, client: fakeClient(100), parsePage: parseWorksPage, repo: crashingRepo,
+    source: createImslpSource({ client: fakeClient(100), parsePage: parseWorksPage }), repo: crashingRepo,
     options: { limit: 20, pageSize: 10, start: 0, resume: false, fresh: false }, log: () => {},
   });
   assert.equal(summary.status, 'failed');
@@ -207,10 +209,10 @@ test('crash mid-page (before commit) leaves no partial data; resume refetches th
 
 test('a second importer cannot take the lock while the first holds it', async () => {
   const key = randomInt(1, 2 ** 40); // never the real importer's key
-  const first = await repo.acquireImporterLock(pool, { key });
+  const first = await repo.acquireImporterLock({ key });
   try {
     const otherPool = db.makePool({ max: 2 }); // a separate "process"
-    const second = await repo.acquireImporterLock(otherPool, { key });
+    const second = await createPostgresRepository(otherPool).acquireImporterLock({ key });
     assert.equal(second, null);
     await otherPool.end();
   } finally {

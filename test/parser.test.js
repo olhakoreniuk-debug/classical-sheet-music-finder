@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseWorksPage, parseWork, parsePageId, parseTimestamp } from '../src/parser.js';
+import { parseWorksPage, parseWork, parsePageId, parseTimestamp } from '../src/adapters/imslp/parser.js';
 
 // ---------- helpers ----------
 
