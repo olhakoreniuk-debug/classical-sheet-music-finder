@@ -1,0 +1,82 @@
+.badge {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-planned);
+  background: var(--color-planned-bg);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.facet {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 2rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+.summary::before {
+  content: '▸';
+  margin-right: var(--space-1);
+  font-size: 0.8rem;
+  transition: transform 0.15s;
+}
+
+.facet[open] .summary::before {
+  transform: rotate(90deg);
+}
+
+.summary > span:first-child {
+  flex: 1;
+}
+
+.body,
+.card {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.body p,
+.card p {
+  margin: var(--space-2) 0 0;
+}
+
+.examples {
+  line-height: 1.5;
+}
+
+.card {
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+}
+
+.cardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: 1rem;
+}

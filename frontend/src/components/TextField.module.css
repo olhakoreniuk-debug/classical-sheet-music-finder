@@ -1,0 +1,29 @@
+.field {
+  display: flex;
+  flex-direction: column;
+}
+
+.required {
+  font-weight: 400;
+  color: var(--color-danger);
+  font-size: 0.875rem;
+}
+
+.optional {
+  font-weight: 400;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.errors {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  color: var(--color-danger);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.errors li::before {
+  content: '⚠ ';
+}

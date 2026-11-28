@@ -1,0 +1,35 @@
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0.3rem var(--space-4);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--color-text);
+  background: var(--color-info-bg);
+  border-top: 1px solid var(--color-info-border);
+}
+
+.tag {
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+  background: transparent;
+  padding: 0;
+}
+
+@media (max-width: 30rem) {
+  .banner {
+    justify-content: flex-start;
+    font-size: 0.75rem;
+  }
+
+  /* The essential message stays; the detail is repeated on the "Add a work" page. */
+  .extra {
+    display: none;
+  }
+}
