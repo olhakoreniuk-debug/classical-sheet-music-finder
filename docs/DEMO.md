@@ -131,13 +131,13 @@ Then explain, opening the files if useful:
 
 | Topic | Where | Key point |
 |---|---|---|
-| Rate limiting | `src/imslpClient.js` | at least 2 s between requests (IMSLP `Crawl-delay: 2`), including retries |
-| Error handling | `src/imslpClient.js` | timeout, retries with backoff for network errors / 429 / 5xx, IMSLP errors that arrive as HTTP 200 |
-| Bad records | `src/parser.js` | skipped with a reason; the rest of the page is still imported |
-| Transactions | `src/repository.js` (`savePage`) | one page = one transaction, including the progress checkpoint |
-| Resumption | `src/importer.js`, `import_runs.next_offset` | `--resume` continues a failed or interrupted run from the saved offset |
-| One importer at a time | `src/repository.js` (`acquireImporterLock`) | PostgreSQL advisory lock |
-| No full import by accident | `src/importer.js` | default 10 records, maximum 5,000 per run, no `--all` |
+| Rate limiting | `src/adapters/imslp/imslpClient.js` | at least 2 s between requests (IMSLP `Crawl-delay: 2`), including retries |
+| Error handling | `src/adapters/imslp/imslpClient.js` | timeout, retries with backoff for network errors / 429 / 5xx, IMSLP errors that arrive as HTTP 200 |
+| Bad records | `src/adapters/imslp/parser.js` | skipped with a reason; the rest of the page is still imported |
+| Transactions | `src/adapters/postgres/repository.js` (`savePage`) | one page = one transaction, including the progress checkpoint |
+| Resumption | `src/core/importCatalog.js`, `import_runs.next_offset` | `--resume` continues a failed or interrupted run from the saved offset |
+| One importer at a time | `src/adapters/postgres/repository.js` (`acquireImporterLock`) | PostgreSQL advisory lock |
+| No full import by accident | `src/core/importCatalog.js` | default 10 records, maximum 5,000 per run, no `--all` |
 
 ### A5. Confirm nothing changed
 

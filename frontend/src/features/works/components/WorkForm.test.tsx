@@ -58,5 +58,8 @@ describe('WorkForm', () => {
     await user.type(screen.getByLabelText(/^Title/), 'Anything');
     await user.click(screen.getByRole('button', { name: 'Add work' }));
     expect((await screen.findByRole('alert')).textContent).toContain('disabled on this server');
+    // Read-only state: explained, and Save is no longer offered.
+    expect(screen.getByText('Read-only server.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Add work' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

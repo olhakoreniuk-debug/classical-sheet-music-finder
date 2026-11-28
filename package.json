@@ -12,9 +12,15 @@
     "test:db": "node --env-file-if-exists=.env --test --test-concurrency=1 \"test/db/*.test.js\"",
     "fetch:sample": "node --env-file-if-exists=.env scripts/fetch-sample.js",
     "import": "node --env-file-if-exists=.env scripts/import.js",
-    "verify:import": "node --env-file-if-exists=.env scripts/verify-import.js"
+    "verify:import": "node --env-file-if-exists=.env scripts/verify-import.js",
+    "migrate": "node --env-file-if-exists=.env scripts/migrate.js",
+    "api": "node --env-file-if-exists=.env scripts/serve-api.js"
   },
   "dependencies": {
-    "pg": "^8.23.1"
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "express": "5.3.0",
+    "pg": "^8.23.1",
+    "yaml": "2.9.1"
   }
 }

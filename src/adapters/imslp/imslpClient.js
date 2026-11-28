@@ -213,10 +213,3 @@ export function createImslpClient(options = {}) {
 
   return { fetchWorksPage };
 }
-
-// Convenience: a shared client with default settings.
-const defaultClient = createImslpClient();
-
-export function fetchWorksPage({ start, limit }) {
-  return defaultClient.fetchWorksPage({ start, limit });
-}

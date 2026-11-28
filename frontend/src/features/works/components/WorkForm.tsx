@@ -27,11 +27,23 @@ const FIELD_IDS: Record<WorkFormField, string> = {
 
 const NO_ERRORS: MappedFieldErrors = { byField: {}, general: [] };
 
+const PROBLEM_BASE = 'https://classical-sheet-music-finder.local/problems/';
+
+/** True when the server refused the write because it is configured read-only (ADR-0003). */
+function isWritesDisabled(error: unknown): boolean {
+  return isApiError(error) && error.status === 403 && error.problem?.type === `${PROBLEM_BASE}writes-disabled`;
+}
+
 function errorsFromFailure(error: unknown): MappedFieldErrors {
   if (!isApiError(error)) return { byField: {}, general: [describeError(error)] };
   if (error.status === 422) return mapFieldErrors(error.fieldErrors);
   if (error.status === 409) return { byField: { pageUrl: [error.message] }, general: [] };
-  if (error.status === 403) return { byField: {}, general: ['Adding works is disabled on this server.'] };
+  if (isWritesDisabled(error)) {
+    return { byField: {}, general: ['Adding works is disabled on this server, so nothing was saved.'] };
+  }
+  if (error.status === 403) {
+    return { byField: {}, general: ['The server refused the request from this page, so nothing was saved.'] };
+  }
   return { byField: {}, general: [describeError(error)] };
 }
 
@@ -43,6 +55,8 @@ export function WorkForm({ onCreated }: WorkFormProps) {
   const { submit, submitting } = useCreateWork();
   const [values, setValues] = useState<WorkFormValues>(EMPTY_WORK_FORM);
   const [errors, setErrors] = useState<MappedFieldErrors>(NO_ERRORS);
+  // Learned from the server's 403 writes-disabled answer; the API has no other way to tell.
+  const [readOnly, setReadOnly] = useState(false);
   const summaryRef = useRef<HTMLDivElement>(null);
 
   const invalidFields = FORM_FIELDS.filter((field) => (errors.byField[field]?.length ?? 0) > 0);
@@ -60,11 +74,20 @@ export function WorkForm({ onCreated }: WorkFormProps) {
     setErrors(NO_ERRORS);
     const result = await submit(toCreateWorkRequest(values));
     if (result.ok) onCreated(result.work);
-    else setErrors(errorsFromFailure(result.error));
+    else {
+      if (isWritesDisabled(result.error)) setReadOnly(true);
+      setErrors(errorsFromFailure(result.error));
+    }
   };
 
   return (
     <form className={styles.form} onSubmit={handleSubmit} noValidate aria-busy={submitting}>
+      {readOnly && (
+        <p className={styles.readOnly} role="status">
+          <strong>Read-only server.</strong> This catalogue can be browsed, but adding works is turned off in the
+          server&apos;s configuration.
+        </p>
+      )}
       {hasErrors && (
         <div ref={summaryRef} className={styles.summary} role="alert" tabIndex={-1} aria-labelledby="form-error-title">
           <p id="form-error-title" className={styles.summaryTitle}>
@@ -122,7 +145,7 @@ export function WorkForm({ onCreated }: WorkFormProps) {
       />
 
       <div className={styles.actions}>
-        <button type="submit" className={controls.primary} disabled={submitting}>
+        <button type="submit" className={controls.primary} disabled={submitting || readOnly}>
           {submitting ? 'Adding…' : 'Add work'}
         </button>
         <button type="button" className={controls.secondary} onClick={() => { setValues(EMPTY_WORK_FORM); setErrors(NO_ERRORS); }} disabled={submitting}>

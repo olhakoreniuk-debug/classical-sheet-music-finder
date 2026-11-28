@@ -3,7 +3,7 @@
 //
 // Usage: mise exec -- npm run fetch:sample
 
-import { createImslpClient } from '../src/imslpClient.js';
+import { createImslpClient } from '../src/adapters/imslp/imslpClient.js';
 
 const SAMPLE_SIZE = 10;
 

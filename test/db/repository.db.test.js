@@ -20,7 +20,8 @@ import {
   acquireImporterLock,
   ImportRunStateError,
   OffsetMismatchError,
-} from '../../src/repository.js';
+} from '../../src/adapters/postgres/repository.js';
+import { toNeutralWork } from '../../src/adapters/imslp/imslpSource.js';
 
 let db; // test schema handle
 let pool;
@@ -40,8 +41,9 @@ beforeEach(async () => {
 
 // ---------- helpers ----------
 
+// Parser-shaped work converted to the neutral model, as the IMSLP source does.
 function work(n, overrides = {}) {
-  return {
+  return toNeutralWork({
     permlink: `https://imslp.org/wiki/Test_Work_${n}`,
     imslpId: `Test Work ${n} (Bach, Johann Sebastian)`,
     title: `Test Work ${n}`,
@@ -50,7 +52,7 @@ function work(n, overrides = {}) {
     imslpPageId: 1000 + n,
     parent: 'Category:Bach, Johann Sebastian',
     ...overrides,
-  };
+  });
 }
 
 async function worksByPermlink() {
@@ -94,7 +96,7 @@ test('every pooled connection uses only the test schema', async () => {
 // ---------- inserts ----------
 
 test('inserts new works and composers with every column', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   const result = await savePage(pool, {
     runId: run.id,
     pageStart: 0,
@@ -106,8 +108,8 @@ test('inserts new works and composers with every column', async () => {
   });
 
   const rows = await worksByPermlink();
-  const first = rows.get(work(1).permlink);
-  assert.equal(first.imslp_id, work(1).imslpId);
+  const first = rows.get(work(1).sourceWorkId);
+  assert.equal(first.imslp_id, work(1).extra.imslpId);
   assert.equal(first.title, 'Test Work 1');
   assert.equal(first.composer_name, 'Bach, Johann Sebastian');
   assert.equal(first.catalogue_number, 'BWV 1');
@@ -115,7 +117,7 @@ test('inserts new works and composers with every column', async () => {
   assert.equal(first.parent, 'Category:Bach, Johann Sebastian');
   assert.equal(Number(first.last_import_run_id), run.id);
 
-  const second = rows.get(work(2).permlink);
+  const second = rows.get(work(2).sourceWorkId);
   assert.equal(second.catalogue_number, null);
   assert.equal(second.imslp_page_id, null);
   assert.equal(second.parent, null);
@@ -123,20 +125,20 @@ test('inserts new works and composers with every column', async () => {
 });
 
 test('a work without composer gets composer_id NULL and creates no composer', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   const result = await savePage(pool, {
     runId: run.id, pageStart: 0, works: [work(1, { composerName: null })], fetchedCount: 1,
   });
   assert.equal(result.inserted, 1);
   assert.equal(result.composersInserted, 0);
-  const row = (await worksByPermlink()).get(work(1).permlink);
+  const row = (await worksByPermlink()).get(work(1).sourceWorkId);
   assert.equal(row.composer_id, null);
   assert.equal(await count('composers'), 0);
 });
 
 test('stores Unicode composer names and titles unchanged', async () => {
   const names = ['Dvořák, Antonín', 'Чайковський, Петро', '武満徹', 'Saint-Saëns, Camille'];
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await savePage(pool, {
     runId: run.id,
     pageStart: 0,
@@ -146,13 +148,13 @@ test('stores Unicode composer names and titles unchanged', async () => {
   const { rows } = await pool.query('SELECT name FROM composers ORDER BY id');
   assert.deepEqual(rows.map((row) => row.name), names);
   const stored = await worksByPermlink();
-  assert.equal(stored.get(work(1).permlink).title, 'Œuvre Чайковський, Петро');
+  assert.equal(stored.get(work(1).sourceWorkId).title, 'Œuvre Чайковський, Петро');
 });
 
 // ---------- upsert counters (real PostgreSQL 17 RETURNING behaviour) ----------
 
 test('UPSERT counters: new, same works again, then partly changed works', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   const page = [work(1), work(2), work(3)];
 
   const first = await savePage(pool, { runId: run.id, pageStart: 0, works: page, fetchedCount: 3 });
@@ -173,7 +175,7 @@ test('UPSERT counters: new, same works again, then partly changed works', async 
 });
 
 test('each data column change counts as an update, including setting a value to NULL', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 1 });
   const changes = [
     { imslpId: 'changed id' },
@@ -184,41 +186,42 @@ test('each data column change counts as an update, including setting a value to 
     { imslpPageId: 99 },
     { parent: 'Category:Other' },
   ];
-  let current = work(1);
+  let overrides = {};
   let offset = 1;
   for (const change of changes) {
-    current = { ...current, ...change };
+    overrides = { ...overrides, ...change }; // parser-field terms, mapped like the IMSLP source does
+    const current = work(1, overrides);
     const result = await savePage(pool, { runId: run.id, pageStart: offset, works: [current], fetchedCount: 1 });
     offset += 1;
     assert.equal(result.updated, 1, `expected an update for ${JSON.stringify(change)}`);
   }
-  const row = (await worksByPermlink()).get(work(1).permlink);
+  const row = (await worksByPermlink()).get(work(1).sourceWorkId);
   assert.equal(row.composer_id, null);
   assert.equal(row.parent, 'Category:Other');
 });
 
 test('an update changes updated_at and last_import_run_id but not created_at; unchanged rows are not touched', async () => {
-  const run1 = await startImportRun(pool);
+  const run1 = await startImportRun(pool, { sourceCode: 'imslp' });
   await savePage(pool, { runId: run1.id, pageStart: 0, works: [work(1), work(2)], fetchedCount: 2, finish: true });
   const before = await worksByPermlink();
 
-  const run2 = await startImportRun(pool);
+  const run2 = await startImportRun(pool, { sourceCode: 'imslp' });
   const result = await savePage(pool, {
     runId: run2.id, pageStart: 0, works: [work(1, { title: 'New title' }), work(2)], fetchedCount: 2,
   });
   assert.deepEqual([result.inserted, result.updated, result.unchanged], [0, 1, 1]);
 
   const after = await worksByPermlink();
-  const changed = after.get(work(1).permlink);
-  const oldChanged = before.get(work(1).permlink);
+  const changed = after.get(work(1).sourceWorkId);
+  const oldChanged = before.get(work(1).sourceWorkId);
   assert.equal(changed.title, 'New title');
   assert.equal(changed.id, oldChanged.id);
   assert.equal(changed.created_at.getTime(), oldChanged.created_at.getTime());
   assert.ok(changed.updated_at > oldChanged.updated_at, 'updated_at must move forward');
   assert.equal(Number(changed.last_import_run_id), run2.id);
 
-  const unchanged = after.get(work(2).permlink);
-  const oldUnchanged = before.get(work(2).permlink);
+  const unchanged = after.get(work(2).sourceWorkId);
+  const oldUnchanged = before.get(work(2).sourceWorkId);
   assert.equal(unchanged.updated_at.getTime(), oldUnchanged.updated_at.getTime());
   assert.equal(Number(unchanged.last_import_run_id), run1.id);
 });
@@ -226,7 +229,7 @@ test('an update changes updated_at and last_import_run_id but not created_at; un
 // ---------- duplicates across pages ----------
 
 test('duplicates across pages produce one work and one composer row', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1), work(2)], fetchedCount: 2 });
   const page2 = await savePage(pool, { runId: run.id, pageStart: 2, works: [work(2), work(3)], fetchedCount: 2 });
   assert.deepEqual([page2.inserted, page2.updated, page2.unchanged, page2.composersInserted], [1, 0, 1, 0]);
@@ -235,7 +238,7 @@ test('duplicates across pages produce one work and one composer row', async () =
 });
 
 test('works in different pages share an existing composer row', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 1 });
   await savePage(pool, { runId: run.id, pageStart: 1, works: [work(2)], fetchedCount: 1 });
   const { rows } = await pool.query('SELECT DISTINCT composer_id FROM works');
@@ -246,7 +249,7 @@ test('works in different pages share an existing composer row', async () => {
 // ---------- offset check ----------
 
 test('a page that does not start at the stored next_offset is rejected and writes nothing', async () => {
-  const run = await startImportRun(pool, { startOffset: 100 });
+  const run = await startImportRun(pool, { sourceCode: 'imslp', startOffset: 100 });
   await savePage(pool, { runId: run.id, pageStart: 100, works: [work(1)], fetchedCount: 10 });
 
   for (const stale of [100, 105, 120]) {
@@ -262,7 +265,7 @@ test('a page that does not start at the stored next_offset is rejected and write
 });
 
 test('two concurrent saves of the same page: exactly one succeeds', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   const attempt = (n) => savePage(pool, { runId: run.id, pageStart: 0, works: [work(n)], fetchedCount: 5 });
   const results = await Promise.allSettled([attempt(1), attempt(2)]);
   const fulfilled = results.filter((r) => r.status === 'fulfilled');
@@ -279,14 +282,14 @@ test('two concurrent saves of the same page: exactly one succeeds', async () => 
 // ---------- finish flag ----------
 
 test('finish: true marks the run succeeded in the same transaction as the final page', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   const result = await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 10, finish: true });
   assert.equal(result.finished, true);
   const runRow = await getRun(run.id);
   assert.equal(runRow.status, 'succeeded');
   assert.ok(runRow.finished_at instanceof Date);
   assert.equal(runRow.next_offset, 10);
-  assert.equal(await findResumableRun(pool), null);
+  assert.equal(await findResumableRun(pool, 'imslp'), null);
   await assert.rejects(
     savePage(pool, { runId: run.id, pageStart: 10, works: [work(2)], fetchedCount: 1 }),
     ImportRunStateError,
@@ -294,7 +297,7 @@ test('finish: true marks the run succeeded in the same transaction as the final 
 });
 
 test('a failed final page does not mark the run succeeded', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await assert.rejects(savePage(pool, {
     runId: run.id, pageStart: 0, works: [work(1, { title: null })], fetchedCount: 1, finish: true,
   }));
@@ -307,7 +310,7 @@ test('a failed final page does not mark the run succeeded', async () => {
 // ---------- transactions, rollback and progress ----------
 
 test('a constraint violation rolls back the whole page and does not advance next_offset', async () => {
-  const run = await startImportRun(pool, { startOffset: 1000 });
+  const run = await startImportRun(pool, { sourceCode: 'imslp', startOffset: 1000 });
   const bad = work(2, { title: null, composerName: 'New Composer' }); // violates works.title NOT NULL
   await assert.rejects(
     savePage(pool, { runId: run.id, pageStart: 1000, works: [work(1), bad], fetchedCount: 2 }),
@@ -322,7 +325,7 @@ test('a constraint violation rolls back the whole page and does not advance next
 });
 
 test('a page saved to a failed (not resumed) run is refused and writes nothing', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await finishImportRun(pool, run.id, { status: 'failed', errorMessage: 'network' });
   await assert.rejects(
     savePage(pool, { runId: run.id, pageStart: 0, works: [work(1)], fetchedCount: 1 }),
@@ -342,7 +345,7 @@ test('a page for an unknown run is rejected and rolled back', async () => {
 });
 
 test('a page whose records were all skipped still advances next_offset by the raw count', async () => {
-  const run = await startImportRun(pool, { startOffset: 1000 });
+  const run = await startImportRun(pool, { sourceCode: 'imslp', startOffset: 1000 });
   const result = await savePage(pool, { runId: run.id, pageStart: 1000, works: [], fetchedCount: 1000 });
   assert.equal(result.nextOffset, 2000);
   assert.equal(result.inserted + result.updated + result.unchanged, 0);
@@ -355,7 +358,7 @@ test('a page whose records were all skipped still advances next_offset by the ra
 test('connections are released after failures (pool of size 1 does not hang)', async () => {
   const smallPool = db.makePool({ max: 1, connectionTimeoutMillis: 2_000 });
   try {
-    const run = await startImportRun(smallPool);
+    const run = await startImportRun(smallPool, { sourceCode: 'imslp' });
     for (let i = 0; i < 3; i += 1) {
       await assert.rejects(savePage(smallPool, {
         runId: run.id, pageStart: 0, works: [work(1, { title: null })], fetchedCount: 1,
@@ -379,11 +382,11 @@ test('connections are released after failures (pool of size 1 does not hang)', a
 // ---------- run lifecycle and resumption ----------
 
 test('a failed run can be found, resumed and continued from its next_offset', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await savePage(pool, { runId: run.id, pageStart: 0, works: [work(1), work(2)], fetchedCount: 3 });
   await finishImportRun(pool, run.id, { status: 'failed', errorMessage: 'IMSLP timeout' });
 
-  const found = await findResumableRun(pool);
+  const found = await findResumableRun(pool, 'imslp');
   assert.equal(found.id, run.id);
   assert.equal(found.status, 'failed');
   assert.equal(found.nextOffset, 3);
@@ -409,16 +412,16 @@ test('a failed run can be found, resumed and continued from its next_offset', as
   assert.equal(done.works_fetched, 4);
   assert.equal(done.works_upserted, 3);
 
-  assert.equal(await findResumableRun(pool), null);
+  assert.equal(await findResumableRun(pool, 'imslp'), null);
   await assert.rejects(resumeImportRun(pool, run.id), ImportRunStateError);
 });
 
 test('an interrupted run left in status running can be found and resumed', async () => {
-  const run = await startImportRun(pool, { startOffset: 5000 });
+  const run = await startImportRun(pool, { sourceCode: 'imslp', startOffset: 5000 });
   await savePage(pool, { runId: run.id, pageStart: 5000, works: [work(1)], fetchedCount: 1000 });
   // simulate a crash: no finishImportRun
 
-  const found = await findResumableRun(pool);
+  const found = await findResumableRun(pool, 'imslp');
   assert.equal(found.id, run.id);
   assert.equal(found.status, 'running');
   assert.equal(found.nextOffset, 6000);
@@ -427,19 +430,19 @@ test('an interrupted run left in status running can be found and resumed', async
 });
 
 test('findResumableRun ignores older failed runs when the latest run succeeded', async () => {
-  const failed = await startImportRun(pool);
+  const failed = await startImportRun(pool, { sourceCode: 'imslp' });
   await finishImportRun(pool, failed.id, { status: 'failed', errorMessage: 'x' });
-  const ok = await startImportRun(pool);
+  const ok = await startImportRun(pool, { sourceCode: 'imslp' });
   await finishImportRun(pool, ok.id, { status: 'succeeded' });
-  assert.equal(await findResumableRun(pool), null);
+  assert.equal(await findResumableRun(pool, 'imslp'), null);
 });
 
 test('findResumableRun returns null when there are no runs', async () => {
-  assert.equal(await findResumableRun(pool), null);
+  assert.equal(await findResumableRun(pool, 'imslp'), null);
 });
 
 test('finishImportRun refuses a run that is not running', async () => {
-  const run = await startImportRun(pool);
+  const run = await startImportRun(pool, { sourceCode: 'imslp' });
   await finishImportRun(pool, run.id, { status: 'succeeded' });
   await assert.rejects(finishImportRun(pool, run.id, { status: 'failed' }), ImportRunStateError);
   await assert.rejects(finishImportRun(pool, 12345, { status: 'failed' }), ImportRunStateError);

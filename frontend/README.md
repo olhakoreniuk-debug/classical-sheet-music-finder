@@ -10,17 +10,24 @@ Run from this folder in PowerShell, through mise:
 
 ```powershell
 mise exec -- npm ci                 # install the pinned dependencies
-mise exec -- npm run dev            # demonstration mode: http://127.0.0.1:5173/ (no backend needed)
-mise exec -- npm run dev:api        # real API mode: proxies /api to the Express server on 127.0.0.1:3000
+mise exec -- npm run dev            # real data: http://127.0.0.1:5173/, proxies /api to the Express API on 127.0.0.1:3000
+mise exec -- npm run dev:demo       # demonstration mode with built-in sample data (no backend needed)
 mise exec -- npm run check          # API types in sync, type check, lint, tests
-mise exec -- npm run build          # production build (real API mode)
+mise exec -- npm run build          # production build (real API)
 mise exec -- npm run api:types      # regenerate src/api/generated/schema.ts after changing openapi.yaml
 ```
 
-**Demonstration mode** uses built-in sample data that follows the contract. It
-is not read from PostgreSQL, a banner says so on every page, and works added
-there are kept only until the page is reloaded. The final demonstration uses
-real stored data through the Express API (`npm run dev:api`).
+**Real data (default).** Start the API first, from the repository root:
+`mise exec -- npm run api`. The browser only talks to the Vite server, which
+forwards `/api` to Express, so there are no cross-origin requests. The API is
+read-only unless `.env` sets `API_WRITES_ENABLED=true` and lists the page's
+origin (`http://127.0.0.1:5173`) in `API_ALLOWED_ORIGINS` (ADR-0003); while it
+is read-only, the "Add a work" form says so and does not offer to save.
+
+**Demonstration mode** (`npm run dev:demo`, only when asked for explicitly) uses
+built-in sample data that follows the contract. It is not read from
+PostgreSQL, a banner says so on every page, and works added there are kept
+only until the page is reloaded.
 
 ## Structure
 

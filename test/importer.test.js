@@ -5,17 +5,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  runImport,
-  parseImportOptions,
-  readClientOptions,
-  formatSummary,
-  UsageError,
-  DEFAULT_LIMIT,
-} from '../src/importer.js';
-import { parseWorksPage } from '../src/parser.js';
-import { createImslpClient } from '../src/imslpClient.js';
-import { ImportRunStateError, OffsetMismatchError } from '../src/repository.js';
+import { runImport } from '../src/core/importCatalog.js';
+import { ImportRunStateError, OffsetMismatchError, UsageError } from '../src/core/errors.js';
+import { parseImportOptions, readClientOptions, DEFAULT_LIMIT } from '../src/cli/importOptions.js';
+import { formatSummary } from '../src/cli/formatSummary.js';
+import { parseWorksPage } from '../src/adapters/imslp/parser.js';
+import { createImslpClient } from '../src/adapters/imslp/imslpClient.js';
+import { createImslpSource } from '../src/adapters/imslp/imslpSource.js';
 
 // ---------- fake IMSLP data ----------
 
@@ -64,7 +60,7 @@ function fakeRepo({ runs = [], failSaveAt } = {}) {
       const latest = state.runs.at(-1);
       return latest && latest.status !== 'succeeded' ? copy(latest) : null;
     },
-    async startImportRun(_pool, { startOffset }) {
+    async startImportRun({ startOffset }) {
       const run = {
         id: state.runs.length + 1, status: 'running', startOffset, nextOffset: startOffset,
         worksFetched: 0, worksUpserted: 0, errorMessage: null,
@@ -73,26 +69,26 @@ function fakeRepo({ runs = [], failSaveAt } = {}) {
       state.started.push(run.id);
       return copy(run);
     },
-    async resumeImportRun(_pool, id) {
+    async resumeImportRun(id) {
       const run = findRun(id);
       if (!run || run.status === 'succeeded') throw new ImportRunStateError('cannot resume');
       Object.assign(run, { status: 'running', errorMessage: null });
       state.resumed.push(id);
       return copy(run);
     },
-    async finishImportRun(_pool, id, { status, errorMessage = null }) {
+    async finishImportRun(id, { status, errorMessage = null }) {
       state.finishCalls.push({ id, status, errorMessage });
       const run = findRun(id);
       if (!run || run.status !== 'running') throw new ImportRunStateError('not running');
       Object.assign(run, { status, errorMessage });
       return copy(run);
     },
-    async savePage(_pool, { runId, pageStart, works, fetchedCount, finish }) {
+    async savePage({ runId, pageStart, works, fetchedCount, finish }) {
       if (failSaveAt !== undefined && pageStart === failSaveAt) throw new Error('database unavailable');
       const run = findRun(runId);
       if (!run || run.status !== 'running') throw new ImportRunStateError('not running');
       if (run.nextOffset !== pageStart) throw new OffsetMismatchError(runId, pageStart, run.nextOffset);
-      state.saves.push({ runId, pageStart, fetchedCount, permlinks: works.map((w) => w.permlink), finish });
+      state.saves.push({ runId, pageStart, fetchedCount, permlinks: works.map((w) => w.sourceWorkId), finish });
       run.nextOffset = pageStart + fetchedCount;
       run.worksFetched += fetchedCount;
       run.worksUpserted += works.length;
@@ -109,7 +105,7 @@ function options(overrides = {}) {
 
 function importWith({ client, repo, opts, ...rest }) {
   return runImport({
-    pool: {}, client, parsePage: parseWorksPage, repo, options: options(opts), log: () => {}, ...rest,
+    source: createImslpSource({ client, parsePage: parseWorksPage }), repo, options: options(opts), log: () => {}, ...rest,
   });
 }
 

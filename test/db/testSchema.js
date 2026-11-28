@@ -2,17 +2,19 @@
 //
 // Not a test file itself (no ".test.js"), so `node --test` does not run it.
 //
-// createTestSchema() creates schema test_<16 hex chars>, loads db/schema.sql
-// into it and returns pools whose connections use search_path = that schema
+// createTestSchema() creates schema test_<16 hex chars>, builds the tables in
+// it with the migration runner (the same path as real databases, ADR-0006) and returns pools whose connections use search_path = that schema
 // only, so unqualified table names can never reach the application's real
 // tables in "public". drop() removes the schema and asserts that the row
 // counts of the real tables did not change.
 
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
-import { createPool, readDbConfig } from '../../src/db.js';
+import { createPool, readDbConfig } from '../../src/adapters/postgres/db.js';
+import { runMigrations } from '../../src/adapters/postgres/migrations.js';
+
+export const MIGRATIONS_DIR = new URL('../../db/migrations/', import.meta.url);
 
 const SCHEMA_PATTERN = /^test_[0-9a-f]{16}$/;
 const REAL_TABLES = ['works', 'composers', 'import_runs'];
@@ -36,7 +38,8 @@ async function countRealTables(adminPool) {
   return counts;
 }
 
-export async function createTestSchema() {
+// options.migrate = false leaves the schema empty (for testing the runner itself).
+export async function createTestSchema({ migrate = true } = {}) {
   const schema = `test_${randomBytes(8).toString('hex')}`;
   assertTestSchemaName(schema);
   const quotedSchema = pg.escapeIdentifier(schema);
@@ -57,8 +60,7 @@ export async function createTestSchema() {
   }
 
   const pool = makePool();
-  const schemaSql = await readFile(new URL('../../db/schema.sql', import.meta.url), 'utf8');
-  await pool.query(schemaSql);
+  if (migrate) await runMigrations(pool, { dirUrl: MIGRATIONS_DIR });
 
   return {
     schema,
